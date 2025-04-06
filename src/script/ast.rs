@@ -97,7 +97,7 @@ impl<'a> Parser<'a> {
 					self.expect(TokenKind::Return)?;
 					Statement::Return(self.expression(0)?)
 				}
-				TokenKind::If => {
+				TokenKind::If | TokenKind::While => {
 					let result = Statement::Expression(self.expression(0)?);
 					return Ok(result);
 				}
@@ -139,8 +139,8 @@ impl<'a> Parser<'a> {
 		if self.peek()?.is_none() {
 			return Err(ParseError::unexpected_token(allowed, None));
 		}
-		let lhs = self.next()?.unwrap();
-		match lhs.kind {
+		let token = self.next()?.unwrap();
+		match token.kind {
 			TokenKind::Identifier
 			| TokenKind::LParen
 			| TokenKind::Int
@@ -148,7 +148,7 @@ impl<'a> Parser<'a> {
 			| TokenKind::True
 			| TokenKind::False
 			| TokenKind::String => {
-				let mut lhs = match lhs.kind {
+				let mut lhs = match token.kind {
 					TokenKind::Identifier => {
 						if self.accept(TokenKind::LParen)?.is_some() {
 							let mut args = Vec::new();
@@ -163,22 +163,24 @@ impl<'a> Parser<'a> {
 								}
 							}
 							Expression::FunctionCall {
-								name: lhs.location,
+								name: token.location,
 								args,
 							}
 						} else {
-							Expression::Identifier { name: lhs.location }
+							Expression::Identifier {
+								name: token.location,
+							}
 						}
 					}
 					TokenKind::Int => Expression::Constant(Constant::Int(
-						lhs.location.slice_str(self.src).parse().unwrap(),
+						token.location.slice_str(self.src).parse().unwrap(),
 					)),
 					TokenKind::Float => Expression::Constant(Constant::Float(
-						lhs.location.slice_str(self.src).parse().unwrap(),
+						token.location.slice_str(self.src).parse().unwrap(),
 					)),
 					TokenKind::True => Expression::Constant(Constant::Bool(true)),
 					TokenKind::False => Expression::Constant(Constant::Bool(false)),
-					TokenKind::String => Expression::Constant(Constant::String(lhs.location)),
+					TokenKind::String => Expression::Constant(Constant::String(token.location)),
 					TokenKind::LParen => {
 						let lhs = self.expression(0)?;
 						self.expect(TokenKind::RParen)?;
@@ -188,6 +190,16 @@ impl<'a> Parser<'a> {
 				};
 
 				while let Some(peeked) = self.peek()? {
+					if peeked.kind == TokenKind::Equal {
+						self.next()?;
+						let value = self.expression(0)?;
+						lhs = Expression::Assignment(Assignment {
+							variable: token.location,
+							value: Box::new(value),
+						});
+						break;
+					}
+
 					let operator = match peeked.kind {
 						TokenKind::Plus => Op::Arithmetic(ArithOp::Add),
 						TokenKind::Minus => Op::Arithmetic(ArithOp::Subtract),
@@ -275,7 +287,15 @@ impl<'a> Parser<'a> {
 					else_body,
 				})
 			}
-			_ => Err(ParseError::unexpected_token(allowed, Some(lhs))),
+			TokenKind::While => {
+				let condition = self.expression(0)?;
+				let body = self.body()?;
+				Ok(Expression::While {
+					condition: Box::new(condition),
+					body,
+				})
+			}
+			_ => Err(ParseError::unexpected_token(allowed, Some(token))),
 		}
 	}
 }
@@ -326,8 +346,8 @@ pub struct Decleration {
 
 #[derive(Debug, Clone)]
 pub struct Assignment {
-	pub identifier: Location,
-	pub value: Expression,
+	pub variable: Location,
+	pub value: Box<Expression>,
 }
 
 #[derive(Debug, Clone)]
@@ -408,6 +428,11 @@ pub enum Expression {
 		args: Vec<Location>,
 		body: Body,
 	},
+	While {
+		condition: Box<Expression>,
+		body: Body,
+	},
+	Assignment(Assignment),
 }
 
 #[derive(Debug, Clone)]
@@ -460,6 +485,15 @@ impl VM {
 		None
 	}
 
+	pub fn contains(&self, name: &str) -> bool {
+		for scope in self.stack.iter().rev() {
+			if scope.variables.contains_key(name) {
+				return true;
+			}
+		}
+		false
+	}
+
 	pub fn set_variable(&mut self, name: impl Into<String>, value: Value) {
 		if let Some(scope) = self.stack.last_mut() {
 			scope.variables.insert(name.into(), value);
@@ -503,6 +537,15 @@ impl VM {
 					Ok(Value::String(location.slice_str(ast.src).to_string()))
 				}
 			},
+			Expression::Assignment(assignment) => {
+				let value = self.execute_expression(ast, &assignment.value)?;
+				let name = assignment.variable.slice_str(ast.src).to_string();
+				if !self.contains(&name) {
+					return Err(format!("Variable {:?} not found", name));
+				}
+				self.set_variable(name, value.clone());
+				Ok(value)
+			}
 			Expression::Identifier { name } => self
 				.get_variable(name.slice_str(ast.src))
 				.ok_or_else(|| format!("Undefined variable: {:?}", name)),
@@ -714,6 +757,23 @@ impl VM {
 					_ => Err(format!("Expected function, found {:?}", possible_function)),
 				}
 			}
+			Expression::While { condition, body } => {
+				loop {
+					let cond = self.execute_expression(ast, condition)?;
+					match cond {
+						Value::Bool(true) => {
+							self.execute_body(ast, body)?;
+						}
+						Value::Bool(false) => {
+							break;
+						}
+						_ => {
+							return Err(format!("Condition must be a boolean, found {:?}", cond));
+						}
+					}
+				}
+				Ok(Value::Null)
+			}
 		}
 	}
 }
@@ -786,17 +846,10 @@ mod test {
 	#[test]
 	fn vm() {
 		let script = r#"
-            let foo = (45.0 + 17 - 12) * 1000;
-            let bar = fn(x, y) {
-                return x > y;
-            };
-
-            if foo > 2000000 {
-                println("Foo: ", foo); 
-            } else if bar(foo, 69) {
-                println("YEET"); 
-            } else {
-                println("Hello World"); 
+            let i = 0;
+            while i < 100 {
+                println("Index: ", i, " Hello World");
+                i = i + 1;
             }
         "#;
 		let ast = match Ast::new(script) {
