@@ -62,7 +62,7 @@ impl TokenKind {
 	}
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Location {
 	start: u32,
 	end: u32,
@@ -139,9 +139,9 @@ impl<'a> Iterator for Lexer<'a> {
 	type Item = Result<Token, LexerError>;
 
 	fn next(&mut self) -> Option<Self::Item> {
-		let start = self.byte_offset;
 		let peeked = self.chars.clone();
 		for c in peeked {
+			let start = self.byte_offset;
 			return Some(match c {
 				'0'..='9' => {
 					let mut found_decimal = false;

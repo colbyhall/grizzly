@@ -1,85 +1,10 @@
 use {
-	crate::lexer::{Lexer, LexerError, Location, Token, TokenKind},
+	crate::{
+		ast::*,
+		lexer::{Lexer, LexerError, Token, TokenKind},
+	},
 	root::iter::Peekable,
 };
-
-#[derive(Debug)]
-pub struct Ast {
-	pub body: Body,
-}
-
-#[derive(Debug)]
-pub struct Body {
-	pub statements: Vec<Statement>,
-}
-
-#[derive(Debug)]
-pub enum Statement {
-	Decleration(Decleration),
-}
-
-#[derive(Debug)]
-pub struct Decleration {
-	name: Location,
-	value: Expression,
-	mutable: bool,
-}
-
-#[derive(Debug)]
-pub struct Assignment {
-	identifier: Location,
-	value: Expression,
-}
-
-#[derive(Debug)]
-pub struct Branch {
-	pub condition: Expression,
-	pub body: Body,
-}
-
-#[derive(Debug)]
-pub enum Operator {
-	Add,
-	Subtract,
-	Multiply,
-	Divide,
-	LogicalAnd,
-	LogicalOr,
-	LogicalNot,
-}
-
-#[derive(Debug)]
-pub struct OperationRHS {
-	pub operator: Operator,
-	pub operand: Expression,
-}
-
-#[derive(Debug)]
-pub enum Expression {
-	Branch {
-		if_branch: Box<Branch>,
-		else_if_branches: Vec<Branch>,
-		else_body: Option<Body>,
-	},
-	Operation {
-		left: Box<Expression>,
-		operator: Operator,
-		right: Box<Expression>,
-	},
-	Constant {
-		value: Location,
-	},
-	Identifier {
-		name: Location,
-	},
-	Parenthesis {
-		expression: Box<Expression>,
-	},
-	Function {
-		name: Location,
-		args: Vec<Expression>,
-	},
-}
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -104,9 +29,9 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-	pub fn parse(contents: &'a str) -> Result<Ast, ParseError> {
+	pub fn parse(src: &'a str) -> Result<Ast, ParseError> {
 		let mut parser = Parser {
-			lexer: Lexer::new(contents).peekable(),
+			lexer: Lexer::new(src).peekable(),
 		};
 
 		let mut statements = Vec::new();
@@ -115,6 +40,7 @@ impl<'a> Parser<'a> {
 		}
 
 		Ok(Ast {
+			src,
 			body: Body { statements },
 		})
 	}
@@ -256,9 +182,19 @@ impl<'a> Parser<'a> {
 								}
 							}
 						}
-						_ => Expression::Constant {
+						TokenKind::Int => Expression::Constant {
+							kind: Constant::Int,
 							value: token.location,
 						},
+						TokenKind::Float => Expression::Constant {
+							kind: Constant::Float,
+							value: token.location,
+						},
+						TokenKind::String => Expression::Constant {
+							kind: Constant::String,
+							value: token.location,
+						},
+						_ => unreachable!(),
 					};
 
 					if let Some(peeked) = self.peek()? {
