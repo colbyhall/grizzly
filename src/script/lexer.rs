@@ -6,8 +6,9 @@ pub enum TokenKind {
 
 	Int,
 	Float,
-	Char,
 	String,
+	True,
+	False,
 
 	Let,
 	Mut,
@@ -25,16 +26,25 @@ pub enum TokenKind {
 	LCurly,
 	RCurly,
 	Comma,
+	Not,
 	Equal,
+	EqualTo,
+	NotEqualTo,
+
+	And,
+	Or,
+
 	Plus,
 	Minus,
 	Colon,
 	Semicolon,
 	Star,
 	Slash,
-	Bang,
+
 	LessThan,
+	LessThanOrEqual,
 	GreaterThan,
+	GreaterThanOrEqual,
 }
 
 impl TokenKind {
@@ -47,6 +57,9 @@ impl TokenKind {
 				| TokenKind::Else
 				| TokenKind::While
 				| TokenKind::For
+				| TokenKind::Fn
+				| TokenKind::True
+				| TokenKind::False
 		)
 	}
 
@@ -57,9 +70,11 @@ impl TokenKind {
 				| TokenKind::Minus
 				| TokenKind::Star
 				| TokenKind::Slash
-				| TokenKind::Bang
+				| TokenKind::Not
 				| TokenKind::LessThan
+				| TokenKind::LessThanOrEqual
 				| TokenKind::GreaterThan
+				| TokenKind::GreaterThanOrEqual
 		)
 	}
 }
@@ -135,6 +150,7 @@ impl<'a> Lexer<'a> {
 #[derive(Clone, Copy, Debug)]
 pub enum LexerError {
 	UnexpectedChar(usize, char),
+	UnexpectedEOF,
 }
 
 impl<'a> Iterator for Lexer<'a> {
@@ -182,6 +198,8 @@ impl<'a> Iterator for Lexer<'a> {
 						"for" => TokenKind::For,
 						"fn" => TokenKind::Fn,
 						"return" => TokenKind::Return,
+						"true" => TokenKind::True,
+						"false" => TokenKind::False,
 						_ => TokenKind::Identifier,
 					};
 
@@ -193,10 +211,9 @@ impl<'a> Iterator for Lexer<'a> {
 				'"' => {
 					self.byte_offset += c.len_utf8();
 					self.chars.next();
+
 					let start = self.byte_offset;
-
-					let s = self.consume_while(|c| c != '"');
-
+					self.consume_while(|c| c != '"');
 					let end = self.byte_offset;
 
 					self.byte_offset += c.len_utf8();
@@ -342,40 +359,132 @@ impl<'a> Iterator for Lexer<'a> {
 					let end = self.byte_offset;
 
 					self.chars.next();
-					Ok(Token {
-						kind: TokenKind::Equal,
-						location: Location::new(start, end),
-					})
+
+					let mut peeked = self.chars.clone();
+					if peeked.next() == Some('=') {
+						self.byte_offset += 1;
+						let end = self.byte_offset;
+						self.chars.next();
+						Ok(Token {
+							kind: TokenKind::EqualTo,
+							location: Location::new(start, end),
+						})
+					} else {
+						Ok(Token {
+							kind: TokenKind::Equal,
+							location: Location::new(start, end),
+						})
+					}
 				}
 				'!' => {
 					self.byte_offset += c.len_utf8();
 					let end = self.byte_offset;
 
 					self.chars.next();
-					Ok(Token {
-						kind: TokenKind::Bang,
-						location: Location::new(start, end),
-					})
+
+					let mut peeked = self.chars.clone();
+					if peeked.next() == Some('=') {
+						self.byte_offset += 1;
+						let end = self.byte_offset;
+						self.chars.next();
+						Ok(Token {
+							kind: TokenKind::NotEqualTo,
+							location: Location::new(start, end),
+						})
+					} else {
+						Ok(Token {
+							kind: TokenKind::Not,
+							location: Location::new(start, end),
+						})
+					}
 				}
 				'<' => {
 					self.byte_offset += c.len_utf8();
 					let end = self.byte_offset;
 
 					self.chars.next();
-					Ok(Token {
-						kind: TokenKind::LessThan,
-						location: Location::new(start, end),
-					})
+
+					let mut peeked = self.chars.clone();
+					if peeked.next() == Some('=') {
+						self.byte_offset += 1;
+						let end = self.byte_offset;
+						self.chars.next();
+						Ok(Token {
+							kind: TokenKind::LessThanOrEqual,
+							location: Location::new(start, end),
+						})
+					} else {
+						Ok(Token {
+							kind: TokenKind::LessThan,
+							location: Location::new(start, end),
+						})
+					}
 				}
 				'>' => {
 					self.byte_offset += c.len_utf8();
 					let end = self.byte_offset;
 
 					self.chars.next();
-					Ok(Token {
-						kind: TokenKind::GreaterThan,
-						location: Location::new(start, end),
-					})
+
+					let mut peeked = self.chars.clone();
+					if peeked.next() == Some('=') {
+						self.byte_offset += 1;
+						let end = self.byte_offset;
+						self.chars.next();
+						Ok(Token {
+							kind: TokenKind::GreaterThanOrEqual,
+							location: Location::new(start, end),
+						})
+					} else {
+						Ok(Token {
+							kind: TokenKind::GreaterThan,
+							location: Location::new(start, end),
+						})
+					}
+				}
+				'|' => {
+					self.byte_offset += c.len_utf8();
+					self.chars.next();
+
+					let mut peeked = self.chars.clone();
+					match peeked.next() {
+						Some(next) => {
+							if next == '|' {
+								self.byte_offset += 1;
+								let end = self.byte_offset;
+								self.chars.next();
+								Ok(Token {
+									kind: TokenKind::Or,
+									location: Location::new(start, end),
+								})
+							} else {
+								Err(LexerError::UnexpectedChar(self.byte_offset, c))
+							}
+						}
+						_ => Err(LexerError::UnexpectedEOF),
+					}
+				}
+				'&' => {
+					self.byte_offset += c.len_utf8();
+					self.chars.next();
+
+					let mut peeked = self.chars.clone();
+					match peeked.next() {
+						Some(next) => {
+							if next == '&' {
+								self.byte_offset += 1;
+								let end = self.byte_offset;
+								self.chars.next();
+								Ok(Token {
+									kind: TokenKind::Or,
+									location: Location::new(start, end),
+								})
+							} else {
+								Err(LexerError::UnexpectedChar(self.byte_offset, c))
+							}
+						}
+						_ => Err(LexerError::UnexpectedEOF),
+					}
 				}
 				' ' | '\t' | '\n' => {
 					self.consume_while(|c| c.is_whitespace());

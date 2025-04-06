@@ -97,6 +97,10 @@ impl<'a> Parser<'a> {
 					self.expect(TokenKind::Return)?;
 					Statement::Return(self.expression(0)?)
 				}
+				TokenKind::If => {
+					let result = Statement::Expression(self.expression(0)?);
+					return Ok(result);
+				}
 				_ => Statement::Expression(self.expression(0)?),
 			}
 		} else {
@@ -126,8 +130,10 @@ impl<'a> Parser<'a> {
 			TokenKind::Identifier,
 			TokenKind::Int,
 			TokenKind::Float,
-			TokenKind::Char,
 			TokenKind::String,
+			TokenKind::True,
+			TokenKind::False,
+			TokenKind::If,
 		];
 
 		if self.peek()?.is_none() {
@@ -139,7 +145,8 @@ impl<'a> Parser<'a> {
 			| TokenKind::LParen
 			| TokenKind::Int
 			| TokenKind::Float
-			| TokenKind::Char
+			| TokenKind::True
+			| TokenKind::False
 			| TokenKind::String => {
 				let mut lhs = match lhs.kind {
 					TokenKind::Identifier => {
@@ -169,6 +176,8 @@ impl<'a> Parser<'a> {
 					TokenKind::Float => Expression::Constant(Constant::Float(
 						lhs.location.slice_str(self.src).parse().unwrap(),
 					)),
+					TokenKind::True => Expression::Constant(Constant::Bool(true)),
+					TokenKind::False => Expression::Constant(Constant::Bool(false)),
 					TokenKind::String => Expression::Constant(Constant::String(lhs.location)),
 					TokenKind::LParen => {
 						let lhs = self.expression(0)?;
@@ -180,18 +189,33 @@ impl<'a> Parser<'a> {
 
 				while let Some(peeked) = self.peek()? {
 					let operator = match peeked.kind {
-						TokenKind::Plus => Operator::Add,
-						TokenKind::Minus => Operator::Subtract,
-						TokenKind::Star => Operator::Multiply,
-						TokenKind::Slash => Operator::Divide,
+						TokenKind::Plus => Op::Arithmetic(ArithOp::Add),
+						TokenKind::Minus => Op::Arithmetic(ArithOp::Subtract),
+						TokenKind::Star => Op::Arithmetic(ArithOp::Multiply),
+						TokenKind::Slash => Op::Arithmetic(ArithOp::Divide),
+						TokenKind::EqualTo => Op::Comp(CompOp::EqualTo),
+						TokenKind::NotEqualTo => Op::Comp(CompOp::NotEqualTo),
+						TokenKind::LessThan => Op::Comp(CompOp::LessThan),
+						TokenKind::LessThanOrEqual => Op::Comp(CompOp::LessThanOrEqual),
+						TokenKind::GreaterThan => Op::Comp(CompOp::GreaterThan),
+						TokenKind::GreaterThanOrEqual => Op::Comp(CompOp::GreaterThanOrEqual),
+						TokenKind::And => Op::Logical(LogicalOp::And),
 						_ => {
 							break;
 						}
 					};
 
 					let (l_bp, r_bp) = match operator {
-						Operator::Add | Operator::Subtract => (1, 2),
-						Operator::Multiply | Operator::Divide => (3, 4),
+						Op::Arithmetic(operator) => match operator {
+							ArithOp::Add | ArithOp::Subtract => (3, 4),
+							ArithOp::Multiply | ArithOp::Divide => (5, 6),
+						},
+						Op::Comp(_) => (1, 2),
+						Op::Logical(operator) => match operator {
+							LogicalOp::Or | LogicalOp::And => (1, 2),
+							_ => unimplemented!(),
+						},
+						_ => unimplemented!(),
 					};
 					if l_bp < min_bp {
 						break;
@@ -202,7 +226,7 @@ impl<'a> Parser<'a> {
 
 					lhs = Expression::Operation {
 						operator,
-						input: Box::new((lhs, rhs)),
+						input: vec![lhs, rhs],
 					};
 				}
 
@@ -221,6 +245,35 @@ impl<'a> Parser<'a> {
 				let body = self.body()?;
 
 				Ok(Expression::FunctionDecleration { args, body })
+			}
+			TokenKind::If => {
+				let condition = self.expression(0)?;
+				let body = self.body()?;
+				let if_branch = Branch { condition, body };
+
+				let mut else_if_branches = Vec::new();
+				let mut else_body = None;
+				while let Some(peeked) = self.peek()? {
+					if peeked.kind == TokenKind::Else {
+						self.next()?;
+						if self.accept(TokenKind::If)?.is_some() {
+							let condition = self.expression(0)?;
+							let body = self.body()?;
+							else_if_branches.push(Branch { condition, body });
+						} else {
+							else_body = Some(self.body()?);
+							break;
+						}
+					} else {
+						break;
+					}
+				}
+
+				Ok(Expression::Branch {
+					if_branch: Box::new(if_branch),
+					else_if_branches,
+					else_body,
+				})
 			}
 			_ => Err(ParseError::unexpected_token(allowed, Some(lhs))),
 		}
@@ -283,16 +336,50 @@ pub struct Branch {
 	pub body: Body,
 }
 
-#[derive(Debug, Clone)]
-pub enum Operator {
+#[derive(Debug, Clone, Copy)]
+pub enum ArithOp {
 	Add,
 	Subtract,
 	Multiply,
 	Divide,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum CompOp {
+	EqualTo,
+	NotEqualTo,
+	LessThan,
+	LessThanOrEqual,
+	GreaterThan,
+	GreaterThanOrEqual,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum LogicalOp {
+	And,
+	Or,
+	Not,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum BitOp {
+	And,
+	Or,
+	Xor,
+	Not,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Op {
+	Arithmetic(ArithOp),
+	Comp(CompOp),
+	Logical(LogicalOp),
+	Bitwise(BitOp),
+}
+
 #[derive(Debug, Clone)]
 pub enum Constant {
+	Bool(bool),
 	Int(i64),
 	Float(f64),
 	String(Location),
@@ -306,8 +393,8 @@ pub enum Expression {
 		else_body: Option<Body>,
 	},
 	Operation {
-		operator: Operator,
-		input: Box<(Expression, Expression)>,
+		operator: Op,
+		input: Vec<Expression>,
 	},
 	Constant(Constant),
 	Identifier {
@@ -337,6 +424,7 @@ pub enum Function {
 #[derive(Debug, Clone)]
 pub enum Value {
 	Null,
+	Bool(bool),
 	Int(i64),
 	Float(f64),
 	String(String),
@@ -408,6 +496,7 @@ impl VM {
 	fn execute_expression(&mut self, ast: &Ast, expression: &Expression) -> Result<Value, String> {
 		match expression {
 			Expression::Constant(value) => match value {
+				Constant::Bool(x) => Ok(Value::Bool(*x)),
 				Constant::Int(x) => Ok(Value::Int(*x)),
 				Constant::Float(x) => Ok(Value::Float(*x)),
 				Constant::String(location) => {
@@ -417,39 +506,162 @@ impl VM {
 			Expression::Identifier { name } => self
 				.get_variable(name.slice_str(ast.src))
 				.ok_or_else(|| format!("Undefined variable: {:?}", name)),
-			Expression::Operation { operator, input } => {
-				let left_value = self.execute_expression(ast, &input.0)?;
-				let right_value = self.execute_expression(ast, &input.1)?;
-				match operator {
-					Operator::Add => match (left_value, right_value) {
-						(Value::Int(l), Value::Int(r)) => Ok(Value::Int(l + r)),
-						(Value::Float(l), Value::Int(r)) => Ok(Value::Float(l + r as f64)),
-						(Value::Int(l), Value::Float(r)) => Ok(Value::Float(l as f64 + r)),
-						(Value::Float(l), Value::Float(r)) => Ok(Value::Float(l + r)),
-						_ => Err("Type mismatch in addition".to_string()),
-					},
-					Operator::Subtract => match (left_value, right_value) {
-						(Value::Int(l), Value::Int(r)) => Ok(Value::Int(l - r)),
-						(Value::Float(l), Value::Int(r)) => Ok(Value::Float(l - r as f64)),
-						(Value::Int(l), Value::Float(r)) => Ok(Value::Float(l as f64 - r)),
-						(Value::Float(l), Value::Float(r)) => Ok(Value::Float(l - r)),
-						_ => Err("Type mismatch in addition".to_string()),
-					},
-					Operator::Multiply => match (left_value, right_value) {
-						(Value::Int(l), Value::Int(r)) => Ok(Value::Int(l * r)),
-						(Value::Float(l), Value::Int(r)) => Ok(Value::Float(l * r as f64)),
-						(Value::Int(l), Value::Float(r)) => Ok(Value::Float(l as f64 * r)),
-						(Value::Float(l), Value::Float(r)) => Ok(Value::Float(l * r)),
-						_ => Err("Type mismatch in addition".to_string()),
-					},
-					Operator::Divide => match (left_value, right_value) {
-						(Value::Int(l), Value::Int(r)) => Ok(Value::Int(l / r)),
-						(Value::Float(l), Value::Int(r)) => Ok(Value::Float(l / r as f64)),
-						(Value::Int(l), Value::Float(r)) => Ok(Value::Float(l as f64 / r)),
-						(Value::Float(l), Value::Float(r)) => Ok(Value::Float(l / r)),
-						_ => Err("Type mismatch in addition".to_string()),
-					},
+			Expression::Operation { operator, input } => match operator {
+				Op::Arithmetic(operator) => {
+					let left_value = self.execute_expression(ast, &input[0])?;
+					let right_value = self.execute_expression(ast, &input[1])?;
+					match operator {
+						ArithOp::Add => match (left_value, right_value) {
+							(Value::Int(l), Value::Int(r)) => Ok(Value::Int(l + r)),
+							(Value::Float(l), Value::Int(r)) => Ok(Value::Float(l + r as f64)),
+							(Value::Int(l), Value::Float(r)) => Ok(Value::Float(l as f64 + r)),
+							(Value::Float(l), Value::Float(r)) => Ok(Value::Float(l + r)),
+							_ => Err("Type mismatch in addition".to_string()),
+						},
+						ArithOp::Subtract => match (left_value, right_value) {
+							(Value::Int(l), Value::Int(r)) => Ok(Value::Int(l - r)),
+							(Value::Float(l), Value::Int(r)) => Ok(Value::Float(l - r as f64)),
+							(Value::Int(l), Value::Float(r)) => Ok(Value::Float(l as f64 - r)),
+							(Value::Float(l), Value::Float(r)) => Ok(Value::Float(l - r)),
+							_ => Err("Type mismatch in subtraction".to_string()),
+						},
+						ArithOp::Multiply => match (left_value, right_value) {
+							(Value::Int(l), Value::Int(r)) => Ok(Value::Int(l * r)),
+							(Value::Float(l), Value::Int(r)) => Ok(Value::Float(l * r as f64)),
+							(Value::Int(l), Value::Float(r)) => Ok(Value::Float(l as f64 * r)),
+							(Value::Float(l), Value::Float(r)) => Ok(Value::Float(l * r)),
+							_ => Err("Type mismatch in multiplication".to_string()),
+						},
+						ArithOp::Divide => match (left_value, right_value) {
+							(Value::Int(l), Value::Int(r)) => Ok(Value::Int(l / r)),
+							(Value::Float(l), Value::Int(r)) => Ok(Value::Float(l / r as f64)),
+							(Value::Int(l), Value::Float(r)) => Ok(Value::Float(l as f64 / r)),
+							(Value::Float(l), Value::Float(r)) => Ok(Value::Float(l / r)),
+							_ => Err("Type mismatch in division".to_string()),
+						},
+					}
 				}
+				Op::Comp(operator) => {
+					let left_value = self.execute_expression(ast, &input[0])?;
+					let right_value = self.execute_expression(ast, &input[1])?;
+					match operator {
+						CompOp::EqualTo => match (left_value, right_value) {
+							(Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l == r)),
+							(Value::Float(l), Value::Int(r)) => Ok(Value::Bool(l as i64 == r)),
+							(Value::Int(l), Value::Float(r)) => Ok(Value::Bool(l == r as i64)),
+							(Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l == r)),
+							(Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
+							(Value::String(l), Value::String(r)) => Ok(Value::Bool(l == r)),
+							_ => Err("TODO".to_string()),
+						},
+
+						CompOp::NotEqualTo => match (left_value, right_value) {
+							(Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l != r)),
+							(Value::Float(l), Value::Int(r)) => Ok(Value::Bool(l as i64 != r)),
+							(Value::Int(l), Value::Float(r)) => Ok(Value::Bool(l != r as i64)),
+							(Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l != r)),
+							(Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l != r)),
+							(Value::String(l), Value::String(r)) => Ok(Value::Bool(l != r)),
+							_ => Err("TODO".to_string()),
+						},
+
+						CompOp::LessThan => match (left_value, right_value) {
+							(Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l < r)),
+							(Value::Float(l), Value::Int(r)) => Ok(Value::Bool(l < r as f64)),
+							(Value::Int(l), Value::Float(r)) => Ok(Value::Bool((l as f64) < r)),
+							(Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l < r)),
+							_ => Err("TODO".to_string()),
+						},
+						CompOp::LessThanOrEqual => match (left_value, right_value) {
+							(Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l <= r)),
+							(Value::Float(l), Value::Int(r)) => Ok(Value::Bool(l <= r as f64)),
+							(Value::Int(l), Value::Float(r)) => Ok(Value::Bool((l as f64) <= r)),
+							(Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l <= r)),
+							_ => Err("TODO".to_string()),
+						},
+						CompOp::GreaterThan => match (left_value, right_value) {
+							(Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l > r)),
+							(Value::Float(l), Value::Int(r)) => Ok(Value::Bool(l > r as f64)),
+							(Value::Int(l), Value::Float(r)) => Ok(Value::Bool((l as f64) > r)),
+							(Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l > r)),
+							_ => Err("TODO".to_string()),
+						},
+						CompOp::GreaterThanOrEqual => match (left_value, right_value) {
+							(Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l >= r)),
+							(Value::Float(l), Value::Int(r)) => Ok(Value::Bool(l >= r as f64)),
+							(Value::Int(l), Value::Float(r)) => Ok(Value::Bool((l as f64) >= r)),
+							(Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l >= r)),
+							_ => Err("TODO".to_string()),
+						},
+					}
+				}
+				Op::Logical(operator) => match operator {
+					LogicalOp::And => {
+						let left_value = self.execute_expression(ast, &input[0])?;
+						let right_value = self.execute_expression(ast, &input[1])?;
+						match (left_value, right_value) {
+							(Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l && r)),
+							_ => Err("TODO".to_string()),
+						}
+					}
+					LogicalOp::Or => {
+						let left_value = self.execute_expression(ast, &input[0])?;
+						let right_value = self.execute_expression(ast, &input[1])?;
+						match (left_value, right_value) {
+							(Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l || r)),
+							_ => Err("TODO".to_string()),
+						}
+					}
+					LogicalOp::Not => {
+						let value = self.execute_expression(ast, &input[0])?;
+						match value {
+							Value::Bool(value) => Ok(Value::Bool(!value)),
+							_ => Err("TODO".to_string()),
+						}
+					}
+				},
+				_ => unimplemented!(),
+			},
+			Expression::Branch {
+				if_branch,
+				else_if_branches,
+				else_body,
+			} => {
+				let if_value = self.execute_expression(ast, &if_branch.condition)?;
+				match if_value {
+					Value::Bool(true) => {
+						return Ok(self
+							.execute_body(ast, &if_branch.body)?
+							.unwrap_or(Value::Null));
+					}
+					Value::Bool(false) => {
+						for branch in else_if_branches {
+							let condition = self.execute_expression(ast, &branch.condition)?;
+							match condition {
+								Value::Bool(true) => {
+									return Ok(self
+										.execute_body(ast, &branch.body)?
+										.unwrap_or(Value::Null));
+								}
+								Value::Bool(false) => {}
+								_ => {
+									return Err(format!(
+										"Condition must be a boolean, found {:?}",
+										condition
+									));
+								}
+							}
+						}
+						if let Some(else_body) = else_body {
+							return Ok(self.execute_body(ast, else_body)?.unwrap_or(Value::Null));
+						}
+					}
+					_ => {
+						return Err(format!("Condition must be a boolean, found {:?}", if_value));
+					}
+				}
+
+				Ok(Value::Null)
 			}
 			Expression::FunctionDecleration { args, body } => {
 				let args = args
@@ -502,7 +714,6 @@ impl VM {
 					_ => Err(format!("Expected function, found {:?}", possible_function)),
 				}
 			}
-			_ => Err("Unsupported expression type".to_string()),
 		}
 	}
 }
@@ -577,10 +788,16 @@ mod test {
 		let script = r#"
             let foo = (45.0 + 17 - 12) * 1000;
             let bar = fn(x, y) {
-                return x + y;
+                return x > y;
             };
-            let baz = bar(foo, 100);
-            println("Hello World Foo Buz Ba   ", baz, " ", foo);
+
+            if foo > 2000000 {
+                println("Foo: ", foo); 
+            } else if bar(foo, 69) {
+                println("YEET"); 
+            } else {
+                println("Hello World"); 
+            }
         "#;
 		let ast = match Ast::new(script) {
 			Ok(ast) => ast,
@@ -590,6 +807,10 @@ mod test {
 						LexerError::UnexpectedChar(index, c) => {
 							println!("Error: unexpected char {:?}", c);
 							print_location(script, Location::new(index, index + 1));
+						}
+						LexerError::UnexpectedEOF => {
+							println!("Error: unexpected EOF");
+							print_location(script, Location::new(script.len(), script.len()));
 						}
 					},
 					ParseError::UnexpectedToken { expected, found } => {
