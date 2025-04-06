@@ -106,7 +106,7 @@ impl<'a> Parser<'a> {
 		let mutable = self.accept(TokenKind::Mut)?.is_some();
 		let name = self.expect(TokenKind::Identifier)?;
 		self.expect(TokenKind::Equal)?;
-		let value = self.expression()?;
+		let value = self.expression(0)?;
 
 		Ok(Decleration {
 			name: name.location,
@@ -115,7 +115,7 @@ impl<'a> Parser<'a> {
 		})
 	}
 
-	fn expression(&mut self) -> Result<Expression, ParseError> {
+	fn expression(&mut self, min_bp: u8) -> Result<Expression, ParseError> {
 		let allowed = &[
 			TokenKind::LParen,
 			TokenKind::Identifier,
@@ -124,88 +124,87 @@ impl<'a> Parser<'a> {
 			TokenKind::Char,
 			TokenKind::String,
 		];
-		if let Some(token) = self.next()? {
-			match token.kind {
-				TokenKind::Identifier
-				| TokenKind::LParen
-				| TokenKind::Int
-				| TokenKind::Float
-				| TokenKind::Char
-				| TokenKind::String => {
-					let lhs = match token.kind {
-						TokenKind::LParen => {
-							let result = self.expression()?;
-							self.expect(TokenKind::RParen)?;
-							Expression::Parenthesis {
-								expression: Box::new(result),
-							}
-						}
-						TokenKind::Identifier => {
-							if self.accept(TokenKind::LParen)?.is_some() {
-								let mut args = Vec::new();
-								loop {
-									if let Some(peeked) = self.peek()? {
-										if peeked.kind == TokenKind::RParen {
-											self.next()?;
-											break;
-										}
-										args.push(self.expression()?);
-										self.accept(TokenKind::Comma)?;
+
+		if self.peek()?.is_none() {
+			return Err(ParseError::unexpected_token(allowed, None));
+		}
+
+		let lhs = self.next()?.unwrap();
+		match lhs.kind {
+			TokenKind::Identifier
+			| TokenKind::LParen
+			| TokenKind::Int
+			| TokenKind::Float
+			| TokenKind::Char
+			| TokenKind::String => {
+				let mut lhs = match lhs.kind {
+					TokenKind::Identifier => {
+						if self.accept(TokenKind::LParen)?.is_some() {
+							let mut args = Vec::new();
+							loop {
+								if let Some(peeked) = self.peek()? {
+									if peeked.kind == TokenKind::RParen {
+										self.next()?;
+										break;
 									}
-								}
-								Expression::Function {
-									name: token.location,
-									args,
-								}
-							} else {
-								Expression::Identifier {
-									name: token.location,
+									args.push(self.expression(0)?);
+									self.accept(TokenKind::Comma)?;
 								}
 							}
-						}
-						TokenKind::Int => Expression::Constant {
-							kind: Constant::Int,
-							value: token.location,
-						},
-						TokenKind::Float => Expression::Constant {
-							kind: Constant::Float,
-							value: token.location,
-						},
-						TokenKind::String => Expression::Constant {
-							kind: Constant::String,
-							value: token.location,
-						},
-						_ => unreachable!(),
-					};
-
-					if let Some(peeked) = self.peek()? {
-						if peeked.kind != TokenKind::Semicolon {
-							let operator = match peeked.kind {
-								TokenKind::Plus => Operator::Add,
-								TokenKind::Minus => Operator::Subtract,
-								TokenKind::Star => Operator::Multiply,
-								TokenKind::Slash => Operator::Divide,
-								_ => {
-									return Ok(lhs);
-								}
-							};
-							self.next()?;
-
-							let operand = self.expression()?;
-							return Ok(Expression::Operation {
-								left: Box::new(lhs),
-								operator,
-								right: Box::new(operand),
-							});
+							Expression::Function {
+								name: lhs.location,
+								args,
+							}
+						} else {
+							Expression::Identifier { name: lhs.location }
 						}
 					}
+					TokenKind::Int => Expression::Constant {
+						kind: Constant::Int,
+						value: lhs.location,
+					},
+					TokenKind::Float => Expression::Constant {
+						kind: Constant::Float,
+						value: lhs.location,
+					},
+					TokenKind::String => Expression::Constant {
+						kind: Constant::String,
+						value: lhs.location,
+					},
+					_ => unreachable!(),
+				};
 
-					Ok(lhs)
+				while let Some(peeked) = self.peek()? {
+					let operator = match peeked.kind {
+						TokenKind::Plus => Operator::Add,
+						TokenKind::Minus => Operator::Subtract,
+						TokenKind::Star => Operator::Multiply,
+						TokenKind::Slash => Operator::Divide,
+						_ => {
+							break;
+						}
+					};
+
+					let (l_bp, r_bp) = match operator {
+						Operator::Add | Operator::Subtract => (1, 2),
+						Operator::Multiply | Operator::Divide => (3, 4),
+					};
+					if l_bp < min_bp {
+						break;
+					}
+
+					self.next()?;
+					let rhs = self.expression(r_bp)?;
+
+					lhs = Expression::Operation {
+						operator,
+						input: Box::new((lhs, rhs)),
+					};
 				}
-				_ => Err(ParseError::unexpected_token(allowed, Some(token))),
+
+				Ok(lhs)
 			}
-		} else {
-			Err(ParseError::unexpected_token(allowed, None))
+			_ => Err(ParseError::unexpected_token(allowed, Some(lhs))),
 		}
 	}
 }
@@ -269,9 +268,6 @@ pub enum Operator {
 	Subtract,
 	Multiply,
 	Divide,
-	LogicalAnd,
-	LogicalOr,
-	LogicalNot,
 }
 
 #[derive(Debug)]
@@ -295,9 +291,8 @@ pub enum Expression {
 		else_body: Option<Body>,
 	},
 	Operation {
-		left: Box<Expression>,
 		operator: Operator,
-		right: Box<Expression>,
+		input: Box<(Expression, Expression)>,
 	},
 	Constant {
 		kind: Constant,
@@ -305,9 +300,6 @@ pub enum Expression {
 	},
 	Identifier {
 		name: Location,
-	},
-	Parenthesis {
-		expression: Box<Expression>,
 	},
 	Function {
 		name: Location,
@@ -383,13 +375,9 @@ impl VM {
 				.get(name.slice_str(ast.src))
 				.cloned()
 				.ok_or_else(|| format!("Undefined variable: {:?}", name)),
-			Expression::Operation {
-				left,
-				operator,
-				right,
-			} => {
-				let left_value = self.evaluate_expression(ast, left)?;
-				let right_value = self.evaluate_expression(ast, right)?;
+			Expression::Operation { operator, input } => {
+				let left_value = self.evaluate_expression(ast, &input.0)?;
+				let right_value = self.evaluate_expression(ast, &input.1)?;
 				match operator {
 					Operator::Add => match (left_value, right_value) {
 						(Value::Int(l), Value::Int(r)) => Ok(Value::Int(l + r)),
@@ -419,8 +407,6 @@ impl VM {
 						(Value::Float(l), Value::Float(r)) => Ok(Value::Float(l / r)),
 						_ => Err("Type mismatch in addition".to_string()),
 					},
-
-					_ => Err("Unsupported operator".to_string()),
 				}
 			}
 			_ => Err("Unsupported expression type".to_string()),
@@ -434,7 +420,7 @@ mod test {
 
 	#[test]
 	fn vm() {
-		let script = "let mut foo = 45.0 + 17 - 12;";
+		let script = "let mut foo = 45.0 + 17 - 12 * 1000;";
 		let ast = Ast::new(script).unwrap();
 
 		let mut vm = VM::new();
