@@ -26,7 +26,7 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-	/// Parses the next token but does not step the lexer iterator forward
+	/// Parses the next token but does not step the lexer forward
 	#[inline]
 	fn peek(&mut self) -> Result<Option<Token>, ParseError> {
 		match self.lexer.peek() {
@@ -171,6 +171,11 @@ impl<'a> Parser<'a> {
 						kind: Constant::String,
 						value: lhs.location,
 					},
+					TokenKind::LParen => {
+						let lhs = self.expression(0)?;
+						self.expect(TokenKind::RParen)?;
+						lhs
+					}
 					_ => unreachable!(),
 				};
 
@@ -420,7 +425,7 @@ mod test {
 
 	#[test]
 	fn vm() {
-		let script = "let mut foo = 45.0 + 17 - 12 * 1000;";
+		let script = "let mut foo = (45.0 + 17 - 12) * 1000;";
 		let ast = Ast::new(script).unwrap();
 
 		let mut vm = VM::new();
