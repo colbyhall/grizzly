@@ -22,6 +22,7 @@ impl ParseError {
 }
 
 struct Parser<'a> {
+	src: &'a str,
 	lexer: Peekable<Lexer<'a>>,
 }
 
@@ -92,6 +93,10 @@ impl<'a> Parser<'a> {
 		let result = if let Some(peeked) = self.peek()? {
 			match peeked.kind {
 				TokenKind::Let => Statement::Decleration(self.decleration()?),
+				TokenKind::Return => {
+					self.expect(TokenKind::Return)?;
+					Statement::Return(self.expression(0)?)
+				}
 				_ => return Err(ParseError::unexpected_token(allowed, Some(peeked))),
 			}
 		} else {
@@ -151,7 +156,7 @@ impl<'a> Parser<'a> {
 									self.accept(TokenKind::Comma)?;
 								}
 							}
-							Expression::Function {
+							Expression::FunctionCall {
 								name: lhs.location,
 								args,
 							}
@@ -159,18 +164,13 @@ impl<'a> Parser<'a> {
 							Expression::Identifier { name: lhs.location }
 						}
 					}
-					TokenKind::Int => Expression::Constant {
-						kind: Constant::Int,
-						value: lhs.location,
-					},
-					TokenKind::Float => Expression::Constant {
-						kind: Constant::Float,
-						value: lhs.location,
-					},
-					TokenKind::String => Expression::Constant {
-						kind: Constant::String,
-						value: lhs.location,
-					},
+					TokenKind::Int => Expression::Constant(Constant::Int(
+						lhs.location.slice_str(self.src).parse().unwrap(),
+					)),
+					TokenKind::Float => Expression::Constant(Constant::Float(
+						lhs.location.slice_str(self.src).parse().unwrap(),
+					)),
+					TokenKind::String => Expression::Constant(Constant::String(lhs.location)),
 					TokenKind::LParen => {
 						let lhs = self.expression(0)?;
 						self.expect(TokenKind::RParen)?;
@@ -209,6 +209,20 @@ impl<'a> Parser<'a> {
 
 				Ok(lhs)
 			}
+			TokenKind::Fn => {
+				self.expect(TokenKind::LParen)?;
+				let mut args = Vec::new();
+				while let Some(arg) = self.accept(TokenKind::Identifier)? {
+					args.push(arg.location);
+					if self.accept(TokenKind::Comma)?.is_none() {
+						break;
+					}
+				}
+				self.expect(TokenKind::RParen)?;
+				let body = self.body()?;
+
+				Ok(Expression::FunctionDecleration { args, body })
+			}
 			_ => Err(ParseError::unexpected_token(allowed, Some(lhs))),
 		}
 	}
@@ -223,6 +237,7 @@ pub struct Ast<'a> {
 impl<'a> Ast<'a> {
 	pub fn new(src: &'a str) -> Result<Ast, ParseError> {
 		let mut parser = Parser {
+			src,
 			lexer: Lexer::new(src).peekable(),
 		};
 
@@ -246,6 +261,7 @@ pub struct Body {
 #[derive(Debug, Clone)]
 pub enum Statement {
 	Decleration(Decleration),
+	Return(Expression),
 }
 
 #[derive(Debug, Clone)]
@@ -275,17 +291,11 @@ pub enum Operator {
 	Divide,
 }
 
-#[derive(Debug)]
-pub struct OperationRHS {
-	pub operator: Operator,
-	pub operand: Expression,
-}
-
 #[derive(Debug, Clone)]
 pub enum Constant {
-	Int,
-	Float,
-	String,
+	Int(i64),
+	Float(f64),
+	String(Location),
 }
 
 #[derive(Debug, Clone)]
@@ -299,16 +309,17 @@ pub enum Expression {
 		operator: Operator,
 		input: Box<(Expression, Expression)>,
 	},
-	Constant {
-		kind: Constant,
-		value: Location,
-	},
+	Constant(Constant),
 	Identifier {
 		name: Location,
 	},
-	Function {
+	FunctionCall {
 		name: Location,
 		args: Vec<Expression>,
+	},
+	FunctionDecleration {
+		args: Vec<Location>,
+		body: Body,
 	},
 }
 
@@ -318,71 +329,88 @@ pub struct Struct {
 }
 
 #[derive(Debug, Clone)]
+pub struct Function {
+	pub args: Vec<String>,
+	pub body: Body,
+}
+
+#[derive(Debug, Clone)]
 pub enum Value {
 	Null,
 	Int(i64),
 	Float(f64),
 	String(String),
 	Struct(Rc<Struct>),
+	Function(Function),
+}
+
+#[derive(Default, Debug, Clone)]
+struct Scope {
+	variables: HashMap<String, Value>,
 }
 
 #[derive(Default, Debug, Clone)]
 pub struct VM {
-	variables: HashMap<String, Value>,
+	stack: Vec<Scope>,
 }
 
 impl VM {
 	pub fn new() -> VM {
 		VM {
-			variables: HashMap::new(),
+			stack: vec![Scope {
+				variables: HashMap::new(),
+			}],
 		}
-	}
-
-	pub fn set_variable(&mut self, name: impl Into<String>, value: Value) {
-		self.variables.insert(name.into(), value);
 	}
 
 	pub fn get_variable(&self, name: &str) -> Option<Value> {
-		self.variables.get(name).cloned()
+		for scope in self.stack.iter().rev() {
+			if let Some(value) = scope.variables.get(name) {
+				return Some(value.clone());
+			}
+		}
+		None
 	}
 
-	pub fn execute(&mut self, ast: &Ast) -> Result<(), String> {
-		for statement in &ast.body.statements {
+	pub fn execute(&mut self, ast: &Ast) -> Result<Option<Value>, String> {
+		self.execute_body(ast, &ast.body)
+	}
+
+	fn execute_body(&mut self, ast: &Ast, body: &Body) -> Result<Option<Value>, String> {
+		for statement in &body.statements {
 			match statement {
 				Statement::Decleration(decl) => {
-					let value = self.evaluate_expression(ast, &decl.value)?;
-					self.variables
-						.insert(decl.name.slice_str(&ast.src).to_string(), value);
+					let value = self.execute_expression(ast, &decl.value)?;
+					self.stack
+						.last_mut()
+						.unwrap()
+						.variables
+						.insert(decl.name.slice_str(ast.src).to_string(), value);
+				}
+				Statement::Return(expression) => {
+					let value = self.execute_expression(ast, expression)?;
+					return Ok(Some(value));
 				}
 			}
 		}
-		Ok(())
+		Ok(None)
 	}
 
-	pub fn evaluate_expression(&self, ast: &Ast, expression: &Expression) -> Result<Value, String> {
+	fn execute_expression(&mut self, ast: &Ast, expression: &Expression) -> Result<Value, String> {
 		match expression {
-			Expression::Constant { kind, value } => {
-				let value_str = value.slice_str(ast.src);
-				match kind {
-					Constant::Int => value_str
-						.parse::<i64>()
-						.map(Value::Int)
-						.map_err(|_| "Invalid integer".to_string()),
-					Constant::Float => value_str
-						.parse::<f64>()
-						.map(Value::Float)
-						.map_err(|_| "Invalid float".to_string()),
-					Constant::String => Ok(Value::String(value_str.to_string())),
+			Expression::Constant(value) => match value {
+				Constant::Int(x) => Ok(Value::Int(*x)),
+				Constant::Float(x) => Ok(Value::Float(*x)),
+				Constant::String(location) => {
+					Ok(Value::String(location.slice_str(ast.src).to_string()))
 				}
-			}
+			},
 			Expression::Identifier { name } => self
-				.variables
-				.get(name.slice_str(ast.src))
-				.cloned()
+				.get_variable(name.slice_str(ast.src))
 				.ok_or_else(|| format!("Undefined variable: {:?}", name)),
 			Expression::Operation { operator, input } => {
-				let left_value = self.evaluate_expression(ast, &input.0)?;
-				let right_value = self.evaluate_expression(ast, &input.1)?;
+				let left_value = self.execute_expression(ast, &input.0)?;
+				let right_value = self.execute_expression(ast, &input.1)?;
 				match operator {
 					Operator::Add => match (left_value, right_value) {
 						(Value::Int(l), Value::Int(r)) => Ok(Value::Int(l + r)),
@@ -414,6 +442,48 @@ impl VM {
 					},
 				}
 			}
+			Expression::FunctionDecleration { args, body } => {
+				let args = args
+					.iter()
+					.map(|arg| arg.slice_str(ast.src).to_string())
+					.collect::<Vec<_>>();
+				Ok(Value::Function(Function {
+					args,
+					body: body.clone(),
+				}))
+			}
+			Expression::FunctionCall { name, args } => {
+				let possible_function = self
+					.get_variable(name.slice_str(ast.src))
+					.ok_or_else(|| format!("Undefined function: {:?}", name))?;
+				match possible_function {
+					Value::Function(func) => {
+						let mut arg_values = Vec::new();
+						for arg in args {
+							let value = self.execute_expression(ast, arg)?;
+							arg_values.push(value);
+						}
+						if arg_values.len() != func.args.len() {
+							return Err(format!(
+								"Function {:?} expected {} arguments, got {}",
+								name,
+								func.args.len(),
+								arg_values.len()
+							));
+						}
+
+						let mut new_scope = Scope {
+							variables: HashMap::new(),
+						};
+						for (arg_name, arg_value) in func.args.iter().zip(arg_values) {
+							new_scope.variables.insert(arg_name.clone(), arg_value);
+						}
+						self.stack.push(new_scope);
+						Ok(self.execute_body(ast, &func.body)?.unwrap_or(Value::Null))
+					}
+					_ => Err(format!("Expected function, found {:?}", possible_function)),
+				}
+			}
 			_ => Err("Unsupported expression type".to_string()),
 		}
 	}
@@ -425,12 +495,65 @@ mod test {
 
 	#[test]
 	fn vm() {
-		let script = "let mut foo = (45.0 + 17 - 12) * 1000;";
-		let ast = Ast::new(script).unwrap();
+		let script = r#"
+            let foo = (45.0 + 17 - 12) * 1000;
+            let bar = fn(x, y) {
+                return x + y;
+            };
+            let baz = bar(foo, 100);
+        "#;
+		let ast = match Ast::new(script) {
+			Ok(ast) => ast,
+			Err(err) => {
+				match err {
+					ParseError::UnexpectedToken { expected, found } => {
+						println!("Error: expected {:?}, found {:?}", expected, found);
+
+						if let Some(found) = found {
+							let mut byte_offset = 0;
+							let mut line = 0;
+							let mut column = 0;
+							for c in script.chars() {
+								if c == '\n' {
+									line += 1;
+									column = 0;
+								} else {
+									column += 1;
+								}
+
+								if byte_offset == found.location.start() {
+									break;
+								}
+
+								byte_offset += c.len_utf8();
+							}
+
+							let lines = script.lines().collect::<Vec<_>>();
+							let min_line = (line - 1).max(0);
+							let max_line = (line + 1).min(lines.len() - 1);
+							for i in min_line..=max_line {
+								println!("{}: {}", i + 1, lines[i]);
+								if i == line {
+									for j in 0..=column {
+										if j == column {
+											println!("^");
+										} else {
+											print!(" ");
+										}
+									}
+								}
+							}
+						}
+					}
+					_ => println!("Error: {:?}", err),
+				}
+				return;
+			}
+		};
 
 		let mut vm = VM::new();
 		vm.execute(&ast).unwrap();
 
-		println!("foo: {:?}", vm.get_variable("foo"));
+		println!("baz: {:?}", vm.get_variable("baz"));
 	}
 }

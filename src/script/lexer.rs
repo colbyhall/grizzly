@@ -15,6 +15,8 @@ pub enum TokenKind {
 	Else,
 	While,
 	For,
+	Fn,
+	Return,
 
 	LParen,
 	RParen,
@@ -178,6 +180,8 @@ impl<'a> Iterator for Lexer<'a> {
 						"else" => TokenKind::Else,
 						"while" => TokenKind::While,
 						"for" => TokenKind::For,
+						"fn" => TokenKind::Fn,
+						"return" => TokenKind::Return,
 						_ => TokenKind::Identifier,
 					};
 
