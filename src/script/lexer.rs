@@ -134,7 +134,7 @@ impl<'a> Lexer<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub enum LexerError {
-	UnexpectedChar(char),
+	UnexpectedChar(usize, char),
 }
 
 impl<'a> Iterator for Lexer<'a> {
@@ -187,6 +187,23 @@ impl<'a> Iterator for Lexer<'a> {
 
 					Ok(Token {
 						kind,
+						location: Location::new(start, end),
+					})
+				}
+				'"' => {
+					self.byte_offset += c.len_utf8();
+					self.chars.next();
+					let start = self.byte_offset;
+
+					let s = self.consume_while(|c| c != '"');
+
+					let end = self.byte_offset;
+
+					self.byte_offset += c.len_utf8();
+					self.chars.next();
+
+					Ok(Token {
+						kind: TokenKind::String,
 						location: Location::new(start, end),
 					})
 				}
@@ -364,7 +381,7 @@ impl<'a> Iterator for Lexer<'a> {
 					self.consume_while(|c| c.is_whitespace());
 					continue;
 				}
-				_ => Err(LexerError::UnexpectedChar(c)),
+				_ => Err(LexerError::UnexpectedChar(self.byte_offset, c)),
 			});
 		}
 		None

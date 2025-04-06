@@ -97,7 +97,7 @@ impl<'a> Parser<'a> {
 					self.expect(TokenKind::Return)?;
 					Statement::Return(self.expression(0)?)
 				}
-				_ => return Err(ParseError::unexpected_token(allowed, Some(peeked))),
+				_ => Statement::Expression(self.expression(0)?),
 			}
 		} else {
 			return Err(ParseError::unexpected_token(allowed, None));
@@ -133,7 +133,6 @@ impl<'a> Parser<'a> {
 		if self.peek()?.is_none() {
 			return Err(ParseError::unexpected_token(allowed, None));
 		}
-
 		let lhs = self.next()?.unwrap();
 		match lhs.kind {
 			TokenKind::Identifier
@@ -262,6 +261,7 @@ pub struct Body {
 pub enum Statement {
 	Decleration(Decleration),
 	Return(Expression),
+	Expression(Expression),
 }
 
 #[derive(Debug, Clone)]
@@ -329,9 +329,9 @@ pub struct Struct {
 }
 
 #[derive(Debug, Clone)]
-pub struct Function {
-	pub args: Vec<String>,
-	pub body: Body,
+pub enum Function {
+	Script { args: Vec<String>, body: Body },
+	Native(fn(&[Value]) -> Result<Value, String>),
 }
 
 #[derive(Debug, Clone)]
@@ -372,6 +372,12 @@ impl VM {
 		None
 	}
 
+	pub fn set_variable(&mut self, name: impl Into<String>, value: Value) {
+		if let Some(scope) = self.stack.last_mut() {
+			scope.variables.insert(name.into(), value);
+		}
+	}
+
 	pub fn execute(&mut self, ast: &Ast) -> Result<Option<Value>, String> {
 		self.execute_body(ast, &ast.body)
 	}
@@ -390,6 +396,9 @@ impl VM {
 				Statement::Return(expression) => {
 					let value = self.execute_expression(ast, expression)?;
 					return Ok(Some(value));
+				}
+				Statement::Expression(expression) => {
+					self.execute_expression(ast, expression)?;
 				}
 			}
 		}
@@ -447,7 +456,7 @@ impl VM {
 					.iter()
 					.map(|arg| arg.slice_str(ast.src).to_string())
 					.collect::<Vec<_>>();
-				Ok(Value::Function(Function {
+				Ok(Value::Function(Function::Script {
 					args,
 					body: body.clone(),
 				}))
@@ -457,30 +466,39 @@ impl VM {
 					.get_variable(name.slice_str(ast.src))
 					.ok_or_else(|| format!("Undefined function: {:?}", name))?;
 				match possible_function {
-					Value::Function(func) => {
-						let mut arg_values = Vec::new();
-						for arg in args {
-							let value = self.execute_expression(ast, arg)?;
-							arg_values.push(value);
-						}
-						if arg_values.len() != func.args.len() {
-							return Err(format!(
-								"Function {:?} expected {} arguments, got {}",
-								name,
-								func.args.len(),
-								arg_values.len()
-							));
-						}
+					Value::Function(func) => match func {
+						Function::Script {
+							args: arg_names,
+							body,
+						} => {
+							let mut arg_values = Vec::new();
+							for arg in args {
+								let value = self.execute_expression(ast, arg)?;
+								arg_values.push(value);
+							}
+							if arg_values.len() != arg_names.len() {
+								return Err(format!(
+									"Function {:?} expected {} arguments, got {}",
+									name,
+									arg_names.len(),
+									arg_values.len()
+								));
+							}
 
-						let mut new_scope = Scope {
-							variables: HashMap::new(),
-						};
-						for (arg_name, arg_value) in func.args.iter().zip(arg_values) {
-							new_scope.variables.insert(arg_name.clone(), arg_value);
+							let mut new_scope = Scope {
+								variables: HashMap::new(),
+							};
+							for (arg_name, arg_value) in arg_names.iter().zip(arg_values) {
+								new_scope.variables.insert(arg_name.clone(), arg_value);
+							}
+							self.stack.push(new_scope);
+							Ok(self.execute_body(ast, &body)?.unwrap_or(Value::Null))
 						}
-						self.stack.push(new_scope);
-						Ok(self.execute_body(ast, &func.body)?.unwrap_or(Value::Null))
-					}
+						Function::Native(f) => (f)(&args
+							.iter()
+							.map(|arg| self.execute_expression(ast, arg))
+							.collect::<Result<Vec<_>, _>>()?),
+					},
 					_ => Err(format!("Expected function, found {:?}", possible_function)),
 				}
 			}
@@ -493,6 +511,67 @@ impl VM {
 mod test {
 	use super::*;
 
+	fn print(args: &[Value]) -> Result<Value, String> {
+		for arg in args {
+			match arg {
+				Value::String(s) => print!("{}", s),
+				Value::Int(i) => print!("{}", i),
+				Value::Float(f) => print!("{}", f),
+				_ => return Err("Unsupported type".to_string()),
+			}
+		}
+		Ok(Value::Null)
+	}
+	fn println(args: &[Value]) -> Result<Value, String> {
+		for arg in args {
+			match arg {
+				Value::String(s) => print!("{}", s),
+				Value::Int(i) => print!("{}", i),
+				Value::Float(f) => print!("{}", f),
+				_ => return Err("Unsupported type".to_string()),
+			}
+		}
+		println!();
+		Ok(Value::Null)
+	}
+
+	fn print_location(src: &str, location: Location) {
+		let mut byte_offset = 0;
+		let mut line = 0;
+		let mut column = 0;
+		for c in src.chars() {
+			if c == '\n' {
+				line += 1;
+				column = 0;
+			} else {
+				column += 1;
+			}
+
+			if byte_offset == location.start() {
+				break;
+			}
+
+			byte_offset += c.len_utf8();
+		}
+
+		let lines = src.lines().collect::<Vec<_>>();
+		let min_line = (line - 1).max(0);
+		let max_line = (line + 1).min(lines.len() - 1);
+		for i in min_line..=max_line {
+			println!("{:>3}: {}", i + 1, lines[i]);
+			if i == line {
+				let column = column + 4;
+				for j in 0..=column {
+					if j == column {
+						println!("^");
+					} else {
+						print!(" ");
+					}
+				}
+			}
+		}
+	}
+
 	#[test]
 	fn vm() {
 		let script = r#"
@@ -501,59 +580,39 @@ mod test {
                 return x + y;
             };
             let baz = bar(foo, 100);
+            println("Hello World Foo Buz Ba   ", baz, " ", foo);
         "#;
 		let ast = match Ast::new(script) {
 			Ok(ast) => ast,
 			Err(err) => {
 				match err {
+					ParseError::LexerError(err) => match err {
+						LexerError::UnexpectedChar(index, c) => {
+							println!("Error: unexpected char {:?}", c);
+							print_location(script, Location::new(index, index + 1));
+						}
+					},
 					ParseError::UnexpectedToken { expected, found } => {
 						println!("Error: expected {:?}, found {:?}", expected, found);
-
 						if let Some(found) = found {
-							let mut byte_offset = 0;
-							let mut line = 0;
-							let mut column = 0;
-							for c in script.chars() {
-								if c == '\n' {
-									line += 1;
-									column = 0;
-								} else {
-									column += 1;
-								}
-
-								if byte_offset == found.location.start() {
-									break;
-								}
-
-								byte_offset += c.len_utf8();
-							}
-
-							let lines = script.lines().collect::<Vec<_>>();
-							let min_line = (line - 1).max(0);
-							let max_line = (line + 1).min(lines.len() - 1);
-							for i in min_line..=max_line {
-								println!("{}: {}", i + 1, lines[i]);
-								if i == line {
-									for j in 0..=column {
-										if j == column {
-											println!("^");
-										} else {
-											print!(" ");
-										}
-									}
-								}
-							}
+							print_location(script, found.location);
 						}
 					}
-					_ => println!("Error: {:?}", err),
 				}
 				return;
 			}
 		};
 
 		let mut vm = VM::new();
+		vm.set_variable(
+			"print".to_string(),
+			Value::Function(Function::Native(print)),
+		);
+		vm.set_variable(
+			"println".to_string(),
+			Value::Function(Function::Native(println)),
+		);
 		vm.execute(&ast).unwrap();
-
 		println!("baz: {:?}", vm.get_variable("baz"));
 	}
 }
