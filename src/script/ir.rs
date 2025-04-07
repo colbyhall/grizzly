@@ -6,7 +6,7 @@ use {
 	root::collections::HashMap,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Type {
 	Bool,
 	Int,
@@ -48,7 +48,7 @@ impl OpArg {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Op {
 	Binary {
 		op: BinaryOp,
@@ -58,7 +58,7 @@ pub enum Op {
 	Unary(UnaryOp, OpArg),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expression {
 	Op(Op),
 
@@ -78,11 +78,20 @@ impl Expression {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Statement {
-	Decleration { ty: usize, value: Expression },
-	Jump { target: usize },
-	JumpIf { condition: usize, target: usize },
+	Decleration {
+		mutable: bool,
+		ty: usize,
+		value: Expression,
+	},
+	Jump {
+		target: usize,
+	},
+	JumpIf {
+		condition: usize,
+		target: usize,
+	},
 	Block,
 }
 
@@ -90,6 +99,7 @@ pub enum Statement {
 pub enum GeneratorError {
 	CanNotImplicitCast { from: usize, to: usize },
 	UnknownDecleration(String),
+	DeclerationImmutable(String),
 }
 
 type Result<T> = root::result::Result<T, GeneratorError>;
@@ -127,6 +137,7 @@ impl Generator {
 		let index = self.statements.len();
 		self.symbols.insert(name, index);
 		self.statements.push(Statement::Decleration {
+			mutable: false,
 			ty: index,
 			value: Expression::Type(ty),
 		});
@@ -134,8 +145,9 @@ impl Generator {
 
 	pub fn generate(&mut self, ast: &Ast) -> Result<()> {
 		for statement in &ast.body.statements {
-			let statement = self.generate_statement(ast, statement)?;
-			self.statements.push(statement);
+			if let Some(statement) = self.generate_statement(ast, statement)? {
+				self.statements.push(statement);
+			}
 		}
 		Ok(())
 	}
@@ -158,14 +170,22 @@ impl Generator {
 					let lhs = match lhs {
 						OpArg::Constant(index) => self.constants[*index].primitive_decl(),
 						OpArg::Variable(index) => match &self.statements[*index] {
-							Statement::Decleration { ty, value: _ } => *ty,
+							Statement::Decleration {
+								mutable: _,
+								ty,
+								value: _,
+							} => *ty,
 							_ => unimplemented!(),
 						},
 					};
 					let rhs = match rhs {
 						OpArg::Constant(index) => self.constants[*index].primitive_decl(),
 						OpArg::Variable(index) => match &self.statements[*index] {
-							Statement::Decleration { ty, value: _ } => *ty,
+							Statement::Decleration {
+								mutable: _,
+								ty,
+								value: _,
+							} => *ty,
 							_ => unimplemented!(),
 						},
 					};
@@ -180,7 +200,11 @@ impl Generator {
 				Op::Unary(_, value) => match value {
 					OpArg::Constant(index) => Ok(self.constants[*index].primitive_decl()),
 					OpArg::Variable(index) => match &self.statements[*index] {
-						Statement::Decleration { ty, value: _ } => Ok(*ty),
+						Statement::Decleration {
+							mutable: _,
+							ty,
+							value: _,
+						} => Ok(*ty),
 						_ => unimplemented!(),
 					},
 				},
@@ -203,14 +227,22 @@ impl Generator {
 		// Acquire the type info from the type decleration
 		let (from, to) = (
 			match &self.statements[from] {
-				Statement::Decleration { ty: _, value } => match value {
+				Statement::Decleration {
+					mutable: _,
+					ty: _,
+					value,
+				} => match value {
 					Expression::Type(ty) => ty,
 					_ => unreachable!(),
 				},
 				_ => unimplemented!(),
 			},
 			match &self.statements[to] {
-				Statement::Decleration { ty: _, value } => match value {
+				Statement::Decleration {
+					mutable: _,
+					ty: _,
+					value,
+				} => match value {
 					Expression::Type(ty) => ty,
 					_ => unreachable!(),
 				},
@@ -241,7 +273,11 @@ impl Generator {
 		}
 	}
 
-	fn generate_statement(&mut self, ast: &Ast, statement: &ast::Statement) -> Result<Statement> {
+	fn generate_statement(
+		&mut self,
+		ast: &Ast,
+		statement: &ast::Statement,
+	) -> Result<Option<Statement>> {
 		match statement {
 			ast::Statement::Decleration(decl) => {
 				// Add this statement into the symbol lookup table. This effectively does SSA as we
@@ -271,7 +307,15 @@ impl Generator {
 					ty
 				};
 
-				Ok(Statement::Decleration { ty, value })
+				Ok(Some(Statement::Decleration {
+					mutable: decl.mutable,
+					ty,
+					value,
+				}))
+			}
+			ast::Statement::Expression(expr) => {
+				self.generate_expression(ast, expr, 0)?;
+				Ok(None)
 			}
 			_ => unimplemented!(),
 		}
@@ -284,6 +328,42 @@ impl Generator {
 		depth: u8,
 	) -> Result<Expression> {
 		match expression {
+			ast::Expression::Assignment(assignment) => {
+				let name = assignment.variable.slice_str(ast.src);
+				match self.symbols.get(name) {
+					Some(s) => {
+						if let Statement::Decleration { mutable, ty, value } =
+							self.statements[*s].clone()
+						{
+							if !mutable {
+								return Err(GeneratorError::DeclerationImmutable(name.to_string()));
+							}
+
+							let new_value =
+								self.generate_expression(ast, &assignment.value, depth)?;
+
+							let index = self.statements.len();
+							self.symbols.insert(name.to_string(), index);
+
+							// Determine what the type of this expression should be
+							let inferred_ty = self.infer_type(&value)?;
+
+							let ty = self.implicit_cast(inferred_ty, ty)?;
+
+							self.statements.push(Statement::Decleration {
+								mutable,
+								ty,
+								value: new_value,
+							});
+
+							Ok(Expression::Variable { target: index })
+						} else {
+							unreachable!();
+						}
+					}
+					None => Err(GeneratorError::UnknownDecleration(name.to_string())),
+				}
+			}
 			ast::Expression::Constant(value) => {
 				let convert = match value {
 					ast::Constant::Bool(value) => Constant::Bool(*value),
@@ -425,7 +505,8 @@ mod test {
 	#[test]
 	fn generate() {
 		let script = r#"
-            let i = 45 + 123;
+            let mut i = 45 + 123;
+            i = 4.0 + i;
             let foo = i > 45;
         "#;
 		let ast = match Ast::new(script) {
@@ -461,19 +542,22 @@ mod test {
 			.map(|(k, v)| (*v, k.clone()))
 			.collect();
 
-		println!("IR:");
+		println!();
 		for (index, statement) in generator.statements.iter().enumerate() {
 			match statement {
-				Statement::Decleration { ty, value } => {
+				Statement::Decleration {
+					mutable: _,
+					ty,
+					value,
+				} => {
 					if *ty == index {
 						continue;
 					}
 
-					print!("\t");
 					if let Some(name) = index_to_symbol.get(&index) {
-						print!("{}", name);
+						print!("{:>8}", name);
 					} else {
-						print!("%{}", index);
+						print!("{:>8}", format!("%{}", index));
 					}
 
 					print!(": ");
@@ -490,5 +574,6 @@ mod test {
 				_ => unimplemented!(),
 			}
 		}
+		println!();
 	}
 }
