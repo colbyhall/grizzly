@@ -217,6 +217,7 @@ impl<'a> Parser<'a> {
 						TokenKind::GreaterThan => Op::Binary(BinaryOp::GreaterThan),
 						TokenKind::GreaterThanOrEqual => Op::Binary(BinaryOp::GreaterThanOrEqual),
 						TokenKind::And => Op::Binary(BinaryOp::LogicalAnd),
+						TokenKind::Or => Op::Binary(BinaryOp::LogicalOr),
 						_ => {
 							break;
 						}

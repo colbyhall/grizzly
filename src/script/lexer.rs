@@ -476,7 +476,7 @@ impl<'a> Iterator for Lexer<'a> {
 								let end = self.byte_offset;
 								self.chars.next();
 								Ok(Token {
-									kind: TokenKind::Or,
+									kind: TokenKind::And,
 									location: Location::new(start, end),
 								})
 							} else {

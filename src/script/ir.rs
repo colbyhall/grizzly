@@ -23,7 +23,7 @@ pub enum Constant {
 }
 
 impl Constant {
-	pub fn primitive_decl(&self) -> usize {
+	pub fn type_decleration(&self) -> usize {
 		match self {
 			Constant::Bool(_) => Generator::BOOL_TYPE_DECL,
 			Constant::Int(_) => Generator::INT_TYPE_DECL,
@@ -152,7 +152,7 @@ impl Generator {
 		Ok(())
 	}
 
-	/// Given an expression, return an index to the type decleration
+	/// Given an expression, return an index to the result type decleration
 	fn infer_type(&mut self, expression: &Expression) -> Result<usize> {
 		match expression {
 			Expression::Op(op) => match op {
@@ -168,7 +168,7 @@ impl Generator {
 					);
 
 					let lhs = match lhs {
-						OpArg::Constant(index) => self.constants[*index].primitive_decl(),
+						OpArg::Constant(index) => self.constants[*index].type_decleration(),
 						OpArg::Variable(index) => match &self.statements[*index] {
 							Statement::Decleration {
 								mutable: _,
@@ -179,7 +179,7 @@ impl Generator {
 						},
 					};
 					let rhs = match rhs {
-						OpArg::Constant(index) => self.constants[*index].primitive_decl(),
+						OpArg::Constant(index) => self.constants[*index].type_decleration(),
 						OpArg::Variable(index) => match &self.statements[*index] {
 							Statement::Decleration {
 								mutable: _,
@@ -190,15 +190,18 @@ impl Generator {
 						},
 					};
 
-					let result = self.implicit_cast(rhs, lhs)?;
 					if convert_to_bool {
 						Ok(Self::BOOL_TYPE_DECL)
 					} else {
-						Ok(result)
+						match (lhs, rhs) {
+							(Self::FLOAT_TYPE_DECL, Self::INT_TYPE_DECL)
+							| (Self::INT_TYPE_DECL, Self::FLOAT_TYPE_DECL) => Ok(Self::FLOAT_TYPE_DECL),
+							_ => Ok(self.implicit_cast(rhs, lhs)?),
+						}
 					}
 				}
 				Op::Unary(_, value) => match value {
-					OpArg::Constant(index) => Ok(self.constants[*index].primitive_decl()),
+					OpArg::Constant(index) => Ok(self.constants[*index].type_decleration()),
 					OpArg::Variable(index) => match &self.statements[*index] {
 						Statement::Decleration {
 							mutable: _,
@@ -209,7 +212,15 @@ impl Generator {
 					},
 				},
 			},
-			Expression::Constant { value } => Ok(self.constants[*value].primitive_decl()),
+			Expression::Constant { value } => Ok(self.constants[*value].type_decleration()),
+			Expression::Variable { target } => match &self.statements[*target] {
+				Statement::Decleration {
+					mutable: _,
+					ty,
+					value: _,
+				} => Ok(*ty),
+				_ => unreachable!(),
+			},
 			_ => unimplemented!(),
 		}
 	}
@@ -280,14 +291,14 @@ impl Generator {
 	) -> Result<Option<Statement>> {
 		match statement {
 			ast::Statement::Decleration(decl) => {
+				// Generate the expression IR
+				let value = self.generate_expression(ast, &decl.value, 0)?;
+
 				// Add this statement into the symbol lookup table. This effectively does SSA as we
 				// will update the variable index to the new variable decl.
 				let name = decl.name.slice_str(ast.src).to_string();
 				let index = self.statements.len();
 				self.symbols.insert(name, index);
-
-				// Generate the expression IR
-				let value = self.generate_expression(ast, &decl.value, 0)?;
 
 				// Determine what the type of this expression should be
 				let ty = self.infer_type(&value)?;
@@ -335,21 +346,23 @@ impl Generator {
 						if let Statement::Decleration { mutable, ty, value } =
 							self.statements[*s].clone()
 						{
+							// Determine if original decleration was marked as mutable
 							if !mutable {
 								return Err(GeneratorError::DeclerationImmutable(name.to_string()));
 							}
 
+							// Generate expression before pushing new SSA decleration
 							let new_value =
 								self.generate_expression(ast, &assignment.value, depth)?;
 
-							let index = self.statements.len();
-							self.symbols.insert(name.to_string(), index);
-
 							// Determine what the type of this expression should be
 							let inferred_ty = self.infer_type(&value)?;
-
 							let ty = self.implicit_cast(inferred_ty, ty)?;
 
+							// Update the symbols table with the newest decleration value and push
+							// the new decleration
+							let index = self.statements.len();
+							self.symbols.insert(name.to_string(), index);
 							self.statements.push(Statement::Decleration {
 								mutable,
 								ty,
@@ -365,7 +378,9 @@ impl Generator {
 				}
 			}
 			ast::Expression::Constant(value) => {
-				let convert = match value {
+				// Convert the ast::Constant (which has no heap allocations) to the memory owning
+				// ir::Constant
+				let value = match value {
 					ast::Constant::Bool(value) => Constant::Bool(*value),
 					ast::Constant::Int(value) => Constant::Int(*value),
 					ast::Constant::Float(value) => Constant::Float(*value),
@@ -374,12 +389,15 @@ impl Generator {
 					}
 				};
 
+				// Add the constant to the list of constants
 				let index = self.constants.len();
-				self.constants.push(convert);
+				self.constants.push(value);
 
 				Ok(Expression::Constant { value: index })
 			}
 			ast::Expression::Identifier { name } => {
+				// Query the identifier in the symbols table and throw an error if it does not
+				// exist.
 				let name = name.slice_str(ast.src);
 				let target = *self
 					.symbols
@@ -392,18 +410,27 @@ impl Generator {
 				input,
 			} => match op {
 				ast::Op::Binary(op) => {
-					let lhs = self
-						.generate_expression(ast, &input[0], depth + 1)?
-						.as_op_arg()
-						.unwrap();
-					let rhs = self
-						.generate_expression(ast, &input[1], depth + 1)?
-						.as_op_arg()
-						.unwrap();
+					let lhs = self.generate_expression(ast, &input[0], depth + 1)?;
+					let rhs = self.generate_expression(ast, &input[1], depth + 1)?;
+
+					let result = Expression::Op(Op::Binary {
+						op: *op,
+						lhs: lhs.as_op_arg().unwrap(),
+						rhs: rhs.as_op_arg().unwrap(),
+					});
+
 					if depth == 0 {
-						Ok(Expression::Op(Op::Binary { op: *op, lhs, rhs }))
+						Ok(result)
 					} else {
-						todo!()
+						let ty = self.infer_type(&result)?;
+
+						let index = self.statements.len();
+						self.statements.push(Statement::Decleration {
+							mutable: false,
+							ty,
+							value: result,
+						});
+						Ok(Expression::Variable { target: index })
 					}
 				}
 				_ => unimplemented!(),
@@ -439,6 +466,7 @@ mod test {
 		let lines = src.lines().collect::<Vec<_>>();
 		let min_line = (line - 1).max(0);
 		let max_line = (line + 1).min(lines.len() - 1);
+		#[allow(clippy::needless_range_loop)]
 		for i in min_line..=max_line {
 			println!("{:>3}: {}", i + 1, lines[i]);
 			if i == line {
@@ -505,9 +533,9 @@ mod test {
 	#[test]
 	fn generate() {
 		let script = r#"
-            let mut i = 45 + 123;
-            i = 4.0 + i;
-            let foo = i > 45;
+            let mut i: Float = 45 + (123 + 123) * 42.0;
+            i = 420;
+            let foo = false || (true && i > 200);
         "#;
 		let ast = match Ast::new(script) {
 			Ok(ast) => ast,
@@ -562,12 +590,11 @@ mod test {
 
 					print!(": ");
 					if let Some(name) = index_to_symbol.get(ty) {
-						print!("{}", name);
+						print!("{:<8} = ", name);
 					} else {
-						print!("%{}", index);
+						print!("%{:<8} = ", index);
 					}
 
-					print!(" = ");
 					print_expression(&generator, &index_to_symbol, value);
 					println!(";");
 				}
