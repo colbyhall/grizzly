@@ -3,7 +3,7 @@ use {
 		ast::{self, Ast, BinaryOp, ParseError, UnaryOp},
 		lexer::{LexerError, Location},
 	},
-	root::collections::HashMap,
+	root::{collections::HashMap, fmt, io::Write},
 };
 
 #[derive(Debug, Clone)]
@@ -14,12 +14,22 @@ pub enum Type {
 	String,
 }
 
-#[derive(Debug)]
 pub enum Constant {
 	Bool(bool),
 	Int(i64),
 	Float(f64),
 	String(String),
+}
+
+impl fmt::Debug for Constant {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Constant::Bool(v) => write!(f, "{}", v),
+			Constant::Int(v) => write!(f, "{}", v),
+			Constant::Float(v) => write!(f, "{}", v),
+			Constant::String(v) => write!(f, "{:?}", v),
+		}
+	}
 }
 
 impl Constant {
@@ -59,11 +69,18 @@ pub enum Op {
 }
 
 #[derive(Debug, Clone)]
+pub struct PhiArg {
+	prev_block: usize,
+	value: usize,
+}
+
+#[derive(Debug, Clone)]
 pub enum Expression {
 	Op(Op),
 
 	Variable { target: usize },
 	Constant { value: usize },
+	Phi(Vec<PhiArg>),
 
 	Type(Type),
 }
@@ -90,7 +107,8 @@ pub enum Statement {
 	},
 	JumpIf {
 		condition: usize,
-		target: usize,
+		if_true: usize,
+		if_false: usize,
 	},
 	Block,
 }
@@ -144,11 +162,7 @@ impl Generator {
 	}
 
 	pub fn generate(&mut self, ast: &Ast) -> Result<()> {
-		for statement in &ast.body.statements {
-			if let Some(statement) = self.generate_statement(ast, statement)? {
-				self.statements.push(statement);
-			}
-		}
+		self.generate_body(ast, &ast.body)?;
 		Ok(())
 	}
 
@@ -282,6 +296,19 @@ impl Generator {
 				to: to_index,
 			})
 		}
+	}
+
+	fn generate_body(&mut self, ast: &Ast, body: &ast::Body) -> Result<usize> {
+		let block = self.statements.len();
+		self.statements.push(Statement::Block);
+
+		for statement in &body.statements {
+			if let Some(statement) = self.generate_statement(ast, statement)? {
+				self.statements.push(statement);
+			}
+		}
+
+		Ok(block)
 	}
 
 	fn generate_statement(
@@ -435,8 +462,48 @@ impl Generator {
 				}
 				_ => unimplemented!(),
 			},
+			ast::Expression::Branch {
+				if_branch,
+				else_if_branches,
+				else_body,
+			} => {
+				self.generate_branch(ast, if_branch)?;
+
+				for branch in else_if_branches.iter() {
+					self.generate_branch(ast, branch)?;
+				}
+
+				if let Some(body) = else_body {
+					self.generate_body(ast, body)?;
+				}
+
+				todo!()
+			}
 			_ => unimplemented!(),
 		}
+	}
+
+	fn generate_branch(&mut self, ast: &Ast, branch: &ast::Branch) -> Result<()> {
+		let condition = self.generate_expression(ast, &branch.condition, 0)?;
+		let ty = self.infer_type(&condition)?;
+		let ty = self.implicit_cast(ty, Self::BOOL_TYPE_DECL)?;
+
+		let index = self.statements.len();
+		self.statements.push(Statement::Decleration {
+			mutable: false,
+			ty,
+			value: condition,
+		});
+		let condition = index;
+
+		self.statements.push(Statement::JumpIf {
+			condition,
+			if_true: 0,
+			if_false: 0,
+		});
+		self.generate_body(ast, &branch.body)?;
+
+		Ok(())
 	}
 }
 
@@ -488,6 +555,9 @@ mod test {
 		expression: &Expression,
 	) {
 		match expression {
+			Expression::NoOp => {
+				print!("noop");
+			}
 			Expression::Variable { target } => {
 				if let Some(name) = index_to_symbol.get(target) {
 					print!("{}", name);
@@ -503,24 +573,25 @@ mod test {
 			}
 			Expression::Op(op) => match op {
 				Op::Binary { op, lhs, rhs } => {
-					print_expression(generator, index_to_symbol, &lhs.to_expression());
 					let op = match op {
-						BinaryOp::Add => "+",
-						BinaryOp::Sub => "-",
-						BinaryOp::Mul => "*",
-						BinaryOp::Div => "/",
+						BinaryOp::Add => "add",
+						BinaryOp::Sub => "sub",
+						BinaryOp::Mul => "mul",
+						BinaryOp::Div => "div",
 
-						BinaryOp::EqualTo => "==",
-						BinaryOp::NotEqualTo => "!=",
-						BinaryOp::LessThan => "<",
-						BinaryOp::LessThanOrEqual => "<=",
-						BinaryOp::GreaterThan => ">",
-						BinaryOp::GreaterThanOrEqual => ">=",
+						BinaryOp::EqualTo => "eq",
+						BinaryOp::NotEqualTo => "neq",
+						BinaryOp::LessThan => "lt",
+						BinaryOp::LessThanOrEqual => "lte",
+						BinaryOp::GreaterThan => "gt",
+						BinaryOp::GreaterThanOrEqual => "gte",
 
-						BinaryOp::LogicalAnd => "&&",
-						BinaryOp::LogicalOr => "||",
+						BinaryOp::LogicalAnd => "and",
+						BinaryOp::LogicalOr => "or",
 					};
-					print!(" {} ", op);
+					print!("{:^3} ", op);
+					print_expression(generator, index_to_symbol, &lhs.to_expression());
+					print!(", ");
 					print_expression(generator, index_to_symbol, &rhs.to_expression());
 				}
 				Op::Unary(_, _) => {
@@ -536,6 +607,11 @@ mod test {
             let mut i: Float = 45 + (123 + 123) * 42.0;
             i = 420;
             let foo = false || (true && i > 200);
+            if i > 420 {
+                i = 100;
+            } else {
+                i = 0;
+            }
         "#;
 		let ast = match Ast::new(script) {
 			Ok(ast) => ast,
@@ -583,22 +659,45 @@ mod test {
 					}
 
 					if let Some(name) = index_to_symbol.get(&index) {
-						print!("{:>8}", name);
+						print!("{:>16}", name);
 					} else {
-						print!("{:>8}", format!("%{}", index));
+						print!("{:>16}", format!("%{}", index));
 					}
 
 					print!(": ");
 					if let Some(name) = index_to_symbol.get(ty) {
-						print!("{:<8} = ", name);
+						print!("{:<5} = ", name);
 					} else {
-						print!("%{:<8} = ", index);
+						print!("%{:<5} = ", index);
 					}
 
 					print_expression(&generator, &index_to_symbol, value);
 					println!(";");
 				}
-				_ => unimplemented!(),
+				Statement::Jump { target } => {
+					print!("{:>16}  ", "br");
+
+					if let Some(name) = index_to_symbol.get(target) {
+						print!("{}", name);
+					} else {
+						print!("%{}", target);
+					}
+				}
+				Statement::JumpIf {
+					condition,
+					if_true,
+					if_false,
+				} => {
+					print!("{:>16}  ", "br");
+
+					if let Some(name) = index_to_symbol.get(condition) {
+						print!("{}", name);
+					} else {
+						print!("%{}", condition);
+					}
+					println!(", %{}, %{}", if_true, if_false);
+				}
+				_ => println!("{:?}", statement),
 			}
 		}
 		println!();
