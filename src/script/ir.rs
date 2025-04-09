@@ -244,24 +244,34 @@ impl Generator {
 		decl
 	}
 
-	pub fn decl(&self, decl: DeclId) -> &Decl {
+	fn decl(&self, decl: DeclId) -> &Decl {
 		match &self.ir[decl.0] {
 			Ir::Decl(d) => d,
 			_ => unreachable!(),
 		}
 	}
 
-	pub fn query_local(&self, start: ScopeId, name: &str) -> Option<(DeclId, ScopeId)> {
-		for id in self.stack.iter().rev() {
-			let scope = self.scope(*id);
+	fn query_local(&self, start: ScopeId, name: &str) -> Option<(DeclId, ScopeId)> {
+		let mut id = start;
+		loop {
+			let scope = self.scope(id);
+
 			if let Some(decl) = scope.locals.get(name) {
-				return Some((*decl, *id));
+				return Some((*decl, id));
+			}
+
+			match scope.parent {
+				Some(p) => {
+					id = p;
+				}
+				None => break,
 			}
 		}
+
 		None
 	}
 
-	pub fn constant(&self, c: ConstId) -> &Const {
+	fn constant(&self, c: ConstId) -> &Const {
 		&self.constants[c.0]
 	}
 
