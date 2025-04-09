@@ -267,14 +267,16 @@ impl<'a> Parser<'a> {
 				Ok(Expr::FnDecl { args, body })
 			}
 			TokenKind::If => {
+				let mut branches = Vec::new();
+
 				let cond = self.expr(0)?;
 				let body = self.body()?;
 				let if_branch = Branch {
 					condition: cond,
 					body,
 				};
+				branches.push(if_branch);
 
-				let mut else_if_branches = Vec::new();
 				let mut else_body = None;
 				while let Some(peeked) = self.peek()? {
 					if peeked.kind == TokenKind::Else {
@@ -282,7 +284,7 @@ impl<'a> Parser<'a> {
 						if self.accept(TokenKind::If)?.is_some() {
 							let condition = self.expr(0)?;
 							let body = self.body()?;
-							else_if_branches.push(Branch { condition, body });
+							branches.push(Branch { condition, body });
 						} else {
 							else_body = Some(self.body()?);
 							break;
@@ -293,8 +295,7 @@ impl<'a> Parser<'a> {
 				}
 
 				Ok(Expr::Branch {
-					if_branch: Box::new(if_branch),
-					else_if_branches,
+					branches,
 					else_body,
 				})
 			}
@@ -416,8 +417,7 @@ pub enum Const {
 #[derive(Debug, Clone)]
 pub enum Expr {
 	Branch {
-		if_branch: Box<Branch>,
-		else_if_branches: Vec<Branch>,
+		branches: Vec<Branch>,
 		else_body: Option<Body>,
 	},
 	Op {
