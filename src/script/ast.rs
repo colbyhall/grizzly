@@ -83,7 +83,7 @@ impl<'a> Parser<'a> {
 
 		let mut statements = Vec::with_capacity(1024);
 		loop {
-			let statement = self.statement()?;
+			let statement = self.stmt()?;
 			statements.push(statement);
 
 			if self.accept(TokenKind::RCurly)?.is_some() {
@@ -91,23 +91,23 @@ impl<'a> Parser<'a> {
 			}
 		}
 
-		Ok(Body { statements })
+		Ok(Body { stmt: statements })
 	}
 
-	fn statement(&mut self) -> Result<Statement, ParseError> {
+	fn stmt(&mut self) -> Result<Stmt, ParseError> {
 		let allowed = &[TokenKind::Let];
 		let result = if let Some(peeked) = self.peek()? {
 			match peeked.kind {
-				TokenKind::Let => Statement::Decleration(self.decleration()?),
+				TokenKind::Let => Stmt::Decleration(self.decl()?),
 				TokenKind::Return => {
 					self.expect(TokenKind::Return)?;
-					Statement::Return(self.expression(0)?)
+					Stmt::Return(self.expr(0)?)
 				}
 				TokenKind::If | TokenKind::While => {
-					let result = Statement::Expression(self.expression(0)?);
+					let result = Stmt::Expression(self.expr(0)?);
 					return Ok(result);
 				}
-				_ => Statement::Expression(self.expression(0)?),
+				_ => Stmt::Expression(self.expr(0)?),
 			}
 		} else {
 			return Err(ParseError::unexpected_token(allowed, None));
@@ -116,7 +116,7 @@ impl<'a> Parser<'a> {
 		Ok(result)
 	}
 
-	fn decleration(&mut self) -> Result<Decleration, ParseError> {
+	fn decl(&mut self) -> Result<Decl, ParseError> {
 		self.expect(TokenKind::Let)?;
 		let mutable = self.accept(TokenKind::Mut)?.is_some();
 		let name = self.expect(TokenKind::Identifier)?;
@@ -125,9 +125,9 @@ impl<'a> Parser<'a> {
 			ty = Some(self.expect(TokenKind::Identifier)?.location);
 		}
 		self.expect(TokenKind::Equal)?;
-		let value = self.expression(0)?;
+		let value = self.expr(0)?;
 
-		Ok(Decleration {
+		Ok(Decl {
 			name: name.location,
 			value,
 			ty,
@@ -135,7 +135,7 @@ impl<'a> Parser<'a> {
 		})
 	}
 
-	fn expression(&mut self, min_bp: u8) -> Result<Expression, ParseError> {
+	fn expr(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
 		let allowed = &[
 			TokenKind::LParen,
 			TokenKind::Identifier,
@@ -169,31 +169,31 @@ impl<'a> Parser<'a> {
 										self.next()?;
 										break;
 									}
-									args.push(self.expression(0)?);
+									args.push(self.expr(0)?);
 									self.accept(TokenKind::Comma)?;
 								}
 							}
-							Expression::FunctionCall {
+							Expr::Call {
 								name: token.location,
 								args,
 							}
 						} else {
-							Expression::Identifier {
+							Expr::Ident {
 								name: token.location,
 							}
 						}
 					}
-					TokenKind::Int => Expression::Constant(Constant::Int(
+					TokenKind::Int => Expr::Const(Const::Int(
 						token.location.slice_str(self.src).parse().unwrap(),
 					)),
-					TokenKind::Float => Expression::Constant(Constant::Float(
+					TokenKind::Float => Expr::Const(Const::Float(
 						token.location.slice_str(self.src).parse().unwrap(),
 					)),
-					TokenKind::True => Expression::Constant(Constant::Bool(true)),
-					TokenKind::False => Expression::Constant(Constant::Bool(false)),
-					TokenKind::String => Expression::Constant(Constant::String(token.location)),
+					TokenKind::True => Expr::Const(Const::Bool(true)),
+					TokenKind::False => Expr::Const(Const::Bool(false)),
+					TokenKind::String => Expr::Const(Const::String(token.location)),
 					TokenKind::LParen => {
-						let lhs = self.expression(0)?;
+						let lhs = self.expr(0)?;
 						self.expect(TokenKind::RParen)?;
 						lhs
 					}
@@ -203,8 +203,8 @@ impl<'a> Parser<'a> {
 				while let Some(peeked) = self.peek()? {
 					if peeked.kind == TokenKind::Equal {
 						self.next()?;
-						let value = self.expression(0)?;
-						lhs = Expression::Assignment(Assignment {
+						let value = self.expr(0)?;
+						lhs = Expr::Asmt(Asmt {
 							variable: token.location,
 							value: Box::new(value),
 						});
@@ -242,10 +242,10 @@ impl<'a> Parser<'a> {
 					}
 
 					self.next()?;
-					let rhs = self.expression(r_bp)?;
+					let rhs = self.expr(r_bp)?;
 
-					lhs = Expression::Operation {
-						operator,
+					lhs = Expr::Op {
+						op: operator,
 						input: vec![lhs, rhs],
 					};
 				}
@@ -264,12 +264,15 @@ impl<'a> Parser<'a> {
 				self.expect(TokenKind::RParen)?;
 				let body = self.body()?;
 
-				Ok(Expression::FunctionDecleration { args, body })
+				Ok(Expr::FnDecl { args, body })
 			}
 			TokenKind::If => {
-				let condition = self.expression(0)?;
+				let cond = self.expr(0)?;
 				let body = self.body()?;
-				let if_branch = Branch { condition, body };
+				let if_branch = Branch {
+					condition: cond,
+					body,
+				};
 
 				let mut else_if_branches = Vec::new();
 				let mut else_body = None;
@@ -277,7 +280,7 @@ impl<'a> Parser<'a> {
 					if peeked.kind == TokenKind::Else {
 						self.next()?;
 						if self.accept(TokenKind::If)?.is_some() {
-							let condition = self.expression(0)?;
+							let condition = self.expr(0)?;
 							let body = self.body()?;
 							else_if_branches.push(Branch { condition, body });
 						} else {
@@ -289,17 +292,17 @@ impl<'a> Parser<'a> {
 					}
 				}
 
-				Ok(Expression::Branch {
+				Ok(Expr::Branch {
 					if_branch: Box::new(if_branch),
 					else_if_branches,
 					else_body,
 				})
 			}
 			TokenKind::While => {
-				let condition = self.expression(0)?;
+				let cond = self.expr(0)?;
 				let body = self.body()?;
-				Ok(Expression::While {
-					condition: Box::new(condition),
+				Ok(Expr::While {
+					cond: Box::new(cond),
 					body,
 				})
 			}
@@ -323,45 +326,45 @@ impl<'a> Ast<'a> {
 
 		let mut statements = Vec::new();
 		while parser.peek()?.is_some() {
-			statements.push(parser.statement()?);
+			statements.push(parser.stmt()?);
 		}
 
 		Ok(Ast {
 			src,
-			body: Body { statements },
+			body: Body { stmt: statements },
 		})
 	}
 }
 
 #[derive(Debug, Clone)]
 pub struct Body {
-	pub statements: Vec<Statement>,
+	pub stmt: Vec<Stmt>,
 }
 
 #[derive(Debug, Clone)]
-pub enum Statement {
-	Decleration(Decleration),
-	Return(Expression),
-	Expression(Expression),
+pub enum Stmt {
+	Decleration(Decl),
+	Return(Expr),
+	Expression(Expr),
 }
 
 #[derive(Debug, Clone)]
-pub struct Decleration {
+pub struct Decl {
 	pub name: Location,
 	pub ty: Option<Location>,
-	pub value: Expression,
+	pub value: Expr,
 	pub mutable: bool,
 }
 
 #[derive(Debug, Clone)]
-pub struct Assignment {
+pub struct Asmt {
 	pub variable: Location,
-	pub value: Box<Expression>,
+	pub value: Box<Expr>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Branch {
-	pub condition: Expression,
+	pub condition: Expr,
 	pub body: Body,
 }
 
@@ -403,7 +406,7 @@ pub enum Op {
 }
 
 #[derive(Debug, Clone)]
-pub enum Constant {
+pub enum Const {
 	Bool(bool),
 	Int(i64),
 	Float(f64),
@@ -411,31 +414,31 @@ pub enum Constant {
 }
 
 #[derive(Debug, Clone)]
-pub enum Expression {
+pub enum Expr {
 	Branch {
 		if_branch: Box<Branch>,
 		else_if_branches: Vec<Branch>,
 		else_body: Option<Body>,
 	},
-	Operation {
-		operator: Op,
-		input: Vec<Expression>,
+	Op {
+		op: Op,
+		input: Vec<Expr>,
 	},
-	Constant(Constant),
-	Identifier {
+	Const(Const),
+	Ident {
 		name: Location,
 	},
-	FunctionCall {
+	Call {
 		name: Location,
-		args: Vec<Expression>,
+		args: Vec<Expr>,
 	},
-	FunctionDecleration {
+	FnDecl {
 		args: Vec<Location>,
 		body: Body,
 	},
 	While {
-		condition: Box<Expression>,
+		cond: Box<Expr>,
 		body: Body,
 	},
-	Assignment(Assignment),
+	Asmt(Asmt),
 }

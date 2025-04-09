@@ -387,7 +387,7 @@ impl Generator {
 		});
 
 		self.stack.push(scope);
-		for stmt in &body.statements {
+		for stmt in &body.stmt {
 			self.eval_stmt(ast, stmt)?;
 		}
 		self.stack.pop();
@@ -395,9 +395,9 @@ impl Generator {
 		Ok(block)
 	}
 
-	fn eval_stmt(&mut self, ast: &Ast, statement: &ast::Statement) -> Result<()> {
+	fn eval_stmt(&mut self, ast: &Ast, statement: &ast::Stmt) -> Result<()> {
 		match statement {
-			ast::Statement::Decleration(decl) => {
+			ast::Stmt::Decleration(decl) => {
 				// Generate the expression IR
 				let value = self.eval_expr(ast, &decl.value, 0)?.unwrap();
 
@@ -434,7 +434,7 @@ impl Generator {
 
 				Ok(())
 			}
-			ast::Statement::Expression(expr) => {
+			ast::Stmt::Expression(expr) => {
 				self.eval_expr(ast, expr, 0)?;
 				Ok(())
 			}
@@ -442,14 +442,9 @@ impl Generator {
 		}
 	}
 
-	fn eval_expr(
-		&mut self,
-		ast: &Ast,
-		expression: &ast::Expression,
-		depth: u8,
-	) -> Result<Option<Expr>> {
+	fn eval_expr(&mut self, ast: &Ast, expression: &ast::Expr, depth: u8) -> Result<Option<Expr>> {
 		match expression {
-			ast::Expression::Assignment(assignment) => {
+			ast::Expr::Asmt(assignment) => {
 				// Query the local from the stack
 				let name = assignment.variable.slice_str(ast.src);
 				let local = self
@@ -483,14 +478,14 @@ impl Generator {
 
 				Ok(Some(Expr::Decl(index)))
 			}
-			ast::Expression::Constant(value) => {
+			ast::Expr::Const(value) => {
 				// Convert the ast::Constant (which has no heap allocations) to the memory owning
 				// ir::Constant
 				let value = match value {
-					ast::Constant::Bool(value) => Const::Bool(*value),
-					ast::Constant::Int(value) => Const::Int(*value),
-					ast::Constant::Float(value) => Const::Float(*value),
-					ast::Constant::String(value) => {
+					ast::Const::Bool(value) => Const::Bool(*value),
+					ast::Const::Int(value) => Const::Int(*value),
+					ast::Const::Float(value) => Const::Float(*value),
+					ast::Const::String(value) => {
 						Const::String(value.slice_str(ast.src).to_string())
 					}
 				};
@@ -501,7 +496,7 @@ impl Generator {
 
 				Ok(Some(Expr::Const(ConstId(index))))
 			}
-			ast::Expression::Identifier { name } => {
+			ast::Expr::Ident { name } => {
 				let name = name.slice_str(ast.src);
 				let decl = self
 					.query_local(self.top_scope(), name)
@@ -515,10 +510,7 @@ impl Generator {
 
 				Ok(Some(Expr::Decl(decl)))
 			}
-			ast::Expression::Operation {
-				operator: op,
-				input,
-			} => match op {
+			ast::Expr::Op { op, input } => match op {
 				ast::Op::Binary(op) => {
 					let lhs = self.eval_expr(ast, &input[0], depth + 1)?.unwrap();
 					let rhs = self.eval_expr(ast, &input[1], depth + 1)?.unwrap();
@@ -544,7 +536,7 @@ impl Generator {
 				}
 				_ => unimplemented!(),
 			},
-			ast::Expression::Branch {
+			ast::Expr::Branch {
 				if_branch,
 				else_if_branches,
 				else_body,
