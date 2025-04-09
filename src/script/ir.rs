@@ -1,9 +1,14 @@
 use {
-	crate::{
-		ast::{self, Ast, BinaryOp, ParseError, UnaryOp},
-		lexer::{LexerError, Location},
+	crate::ast::{
+		self,
+		Ast,
+		BinaryOp,
+		UnaryOp,
 	},
-	root::{collections::HashMap, fmt, io::Write},
+	root::{
+		collections::HashMap,
+		fmt,
+	},
 };
 
 #[derive(Debug, Clone)]
@@ -14,128 +19,164 @@ pub enum Type {
 	String,
 }
 
-pub enum Constant {
+pub enum Const {
 	Bool(bool),
 	Int(i64),
 	Float(f64),
 	String(String),
 }
 
-impl fmt::Debug for Constant {
+impl fmt::Debug for Const {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Constant::Bool(v) => write!(f, "{}", v),
-			Constant::Int(v) => write!(f, "{}", v),
-			Constant::Float(v) => write!(f, "{}", v),
-			Constant::String(v) => write!(f, "{:?}", v),
+			Const::Bool(v) => write!(f, "{}", v),
+			Const::Int(v) => write!(f, "{}", v),
+			Const::Float(v) => write!(f, "{}", v),
+			Const::String(v) => write!(f, "{:?}", v),
 		}
 	}
 }
 
-impl Constant {
-	pub fn type_decleration(&self) -> usize {
+impl Const {
+	pub fn type_decl(&self) -> DeclId {
 		match self {
-			Constant::Bool(_) => Generator::BOOL_TYPE_DECL,
-			Constant::Int(_) => Generator::INT_TYPE_DECL,
-			Constant::Float(_) => Generator::FLOAT_TYPE_DECL,
-			Constant::String(_) => Generator::STRING_TYPE_DECL,
+			Const::Bool(_) => BOOL_DECL,
+			Const::Int(_) => INT_DECL,
+			Const::Float(_) => FLOAT_DECL,
+			Const::String(_) => STRING_TYPE_DECL,
 		}
 	}
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum OpArg {
-	Variable(usize),
-	Constant(usize),
+pub enum Arg {
+	Decl(DeclId),
+	Const(ConstId),
 }
 
-impl OpArg {
-	pub fn to_expression(self) -> Expression {
+impl Arg {
+	pub fn as_expr(self) -> Expr {
 		match self {
-			OpArg::Variable(x) => Expression::Variable { target: x },
-			OpArg::Constant(x) => Expression::Constant { value: x },
+			Arg::Decl(x) => Expr::Decl(x),
+			Arg::Const(x) => Expr::Const(x),
 		}
 	}
 }
 
 #[derive(Debug, Clone)]
 pub enum Op {
-	Binary {
-		op: BinaryOp,
-		lhs: OpArg,
-		rhs: OpArg,
-	},
-	Unary(UnaryOp, OpArg),
+	Binary { op: BinaryOp, lhs: Arg, rhs: Arg },
+	Unary(UnaryOp, Arg),
 }
 
 #[derive(Debug, Clone)]
-pub struct PhiArg {
-	prev_block: usize,
-	value: usize,
-}
-
-#[derive(Debug, Clone)]
-pub enum Expression {
+pub enum Expr {
 	Op(Op),
-
-	Variable { target: usize },
-	Constant { value: usize },
-	Phi(Vec<PhiArg>),
-
+	Decl(DeclId),
+	Const(ConstId),
 	Type(Type),
 }
 
-impl Expression {
-	pub fn as_op_arg(&self) -> Option<OpArg> {
+impl Expr {
+	pub fn assume_arg(&self) -> Arg {
 		match self {
-			Expression::Variable { target } => Some(OpArg::Variable(*target)),
-			Expression::Constant { value } => Some(OpArg::Constant(*value)),
-			_ => None,
+			Expr::Decl(d) => Arg::Decl(*d),
+			Expr::Const(c) => Arg::Const(*c),
+			_ => unreachable!(),
 		}
 	}
 }
 
 #[derive(Debug, Clone)]
-pub enum Statement {
-	Decleration {
-		mutable: bool,
-		ty: usize,
-		value: Expression,
-	},
-	Jump {
-		target: usize,
-	},
-	JumpIf {
-		condition: usize,
-		if_true: usize,
-		if_false: usize,
-	},
+pub struct Decl {
+	mutable: bool,
+	type_decl: DeclId,
+	value: Expr,
+}
+
+macro_rules! define_id {
+	($name:ident) => {
+		#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+		pub struct $name(usize);
+
+		impl root::fmt::Display for $name {
+			fn fmt(&self, f: &mut root::fmt::Formatter<'_>) -> root::fmt::Result {
+				write!(f, "%{}", self.0)
+			}
+		}
+	};
+}
+
+define_id!(DeclId);
+define_id!(ConstId);
+define_id!(BlockId);
+
+#[derive(Debug, Clone)]
+pub struct JumpIf {
+	cond: DeclId,
+	true_block: BlockId,
+	false_block: BlockId,
+}
+
+#[derive(Debug, Clone)]
+pub enum Ir {
+	Decl(Decl),
+	Jump(BlockId),
+	JumpIf(JumpIf),
 	Block,
 }
 
 #[derive(Debug)]
-pub enum GeneratorError {
-	CanNotImplicitCast { from: usize, to: usize },
-	UnknownDecleration(String),
-	DeclerationImmutable(String),
+pub enum Error {
+	CanNotCast { from: Type, to: Type },
+	UnknownDecl(String),
+	DeclImmutable(String),
 }
 
-type Result<T> = root::result::Result<T, GeneratorError>;
+type Result<T> = root::result::Result<T, Error>;
+
+define_id!(ScopeId);
+
+#[derive(Debug, Clone)]
+pub struct Scope {
+	parent: Option<ScopeId>,
+	start: BlockId,
+	locals: HashMap<String, DeclId>,
+	used: Vec<DeclId>,
+}
 
 #[derive(Debug, Default)]
 pub struct Generator {
-	symbols: HashMap<String, usize>,
-	statements: Vec<Statement>,
-	constants: Vec<Constant>,
+	scopes: Vec<Scope>,
+	stack: Vec<ScopeId>,
+	ir: Vec<Ir>,
+	constants: Vec<Const>,
 }
+
+const BOOL_DECL: DeclId = DeclId(1);
+const INT_DECL: DeclId = DeclId(2);
+const FLOAT_DECL: DeclId = DeclId(3);
+const STRING_TYPE_DECL: DeclId = DeclId(4);
 
 impl Generator {
 	pub fn new() -> Self {
 		let mut result = Self {
-			symbols: HashMap::new(),
-			statements: Vec::new(),
+			scopes: Vec::new(),
+			stack: Vec::new(),
+			ir: Vec::new(),
 			constants: Vec::new(),
 		};
+
+		let block = BlockId(result.push_ir(Ir::Block));
+
+		let scope = ScopeId(result.scopes.len());
+		result.scopes.push(Scope {
+			parent: None,
+			start: block,
+			locals: HashMap::new(),
+			used: Vec::new(),
+		});
+		result.stack.push(scope);
 
 		result.register_primitive("Bool", Type::Bool);
 		result.register_primitive("Int", Type::Int);
@@ -145,31 +186,101 @@ impl Generator {
 		result
 	}
 
-	const BOOL_TYPE_DECL: usize = 0;
-	const INT_TYPE_DECL: usize = 1;
-	const FLOAT_TYPE_DECL: usize = 2;
-	const STRING_TYPE_DECL: usize = 3;
+	pub fn generate(&mut self, ast: &Ast) -> Result<()> {
+		self.eval_body(ast, &ast.body)?;
+		Ok(())
+	}
+}
 
-	fn register_primitive(&mut self, name: impl Into<String>, ty: Type) {
-		let name = name.into();
-		let index = self.statements.len();
-		self.symbols.insert(name, index);
-		self.statements.push(Statement::Decleration {
-			mutable: false,
-			ty: index,
-			value: Expression::Type(ty),
-		});
+impl Generator {
+	fn top_scope(&self) -> ScopeId {
+		self.stack.last().copied().unwrap()
 	}
 
-	pub fn generate(&mut self, ast: &Ast) -> Result<()> {
-		self.generate_body(ast, &ast.body)?;
-		Ok(())
+	fn scope(&self, scope: ScopeId) -> &Scope {
+		&self.scopes[scope.0]
+	}
+
+	fn scope_mut(&mut self, scope: ScopeId) -> &mut Scope {
+		&mut self.scopes[scope.0]
+	}
+
+	fn push_ir(&mut self, ir: Ir) -> usize {
+		let index = self.ir.len();
+		self.ir.push(ir);
+		index
+	}
+
+	fn push_decl(&mut self, decl: Decl) -> DeclId {
+		let decl = DeclId(self.push_ir(Ir::Decl(decl)));
+
+		let scope = self.top_scope();
+		let scope = self.scope_mut(scope);
+		scope.used.push(decl);
+
+		decl
+	}
+
+	fn push_local(&mut self, name: &str, decl: Decl) -> DeclId {
+		let top_scope = self.top_scope();
+		let decl = self.push_decl(decl);
+
+		if let Some((prev, prev_scope)) = self.query_local(top_scope, name) {
+			let top_scope = self.scope_mut(top_scope);
+			top_scope.used.push(prev);
+
+			let scope = self.scope_mut(prev_scope);
+			let slot = scope.locals.get_mut(name).unwrap();
+			*slot = decl;
+		} else {
+			let top_scope = self.scope_mut(top_scope);
+
+			if let Some(slot) = top_scope.locals.get_mut(name) {
+				*slot = decl;
+			} else {
+				top_scope.locals.insert(name.to_string(), decl);
+			}
+		}
+		decl
+	}
+
+	pub fn decl(&self, decl: DeclId) -> &Decl {
+		match &self.ir[decl.0] {
+			Ir::Decl(d) => d,
+			_ => unreachable!(),
+		}
+	}
+
+	pub fn query_local(&self, start: ScopeId, name: &str) -> Option<(DeclId, ScopeId)> {
+		for id in self.stack.iter().rev() {
+			let scope = self.scope(*id);
+			if let Some(decl) = scope.locals.get(name) {
+				return Some((*decl, *id));
+			}
+		}
+		None
+	}
+
+	pub fn constant(&self, c: ConstId) -> &Const {
+		&self.constants[c.0]
+	}
+
+	fn register_primitive(&mut self, name: &str, ty: Type) {
+		let index = self.ir.len();
+		self.push_local(
+			name,
+			Decl {
+				mutable: false,
+				type_decl: DeclId(index),
+				value: Expr::Type(ty),
+			},
+		);
 	}
 
 	/// Given an expression, return an index to the result type decleration
-	fn infer_type(&mut self, expression: &Expression) -> Result<usize> {
+	fn infer_type(&mut self, expression: &Expr) -> Result<DeclId> {
 		match expression {
-			Expression::Op(op) => match op {
+			Expr::Op(op) => match op {
 				Op::Binary { op, lhs, rhs } => {
 					let convert_to_bool = matches!(
 						op,
@@ -182,96 +293,52 @@ impl Generator {
 					);
 
 					let lhs = match lhs {
-						OpArg::Constant(index) => self.constants[*index].type_decleration(),
-						OpArg::Variable(index) => match &self.statements[*index] {
-							Statement::Decleration {
-								mutable: _,
-								ty,
-								value: _,
-							} => *ty,
-							_ => unimplemented!(),
-						},
+						Arg::Const(index) => self.constant(*index).type_decl(),
+						Arg::Decl(index) => self.decl(*index).type_decl,
 					};
 					let rhs = match rhs {
-						OpArg::Constant(index) => self.constants[*index].type_decleration(),
-						OpArg::Variable(index) => match &self.statements[*index] {
-							Statement::Decleration {
-								mutable: _,
-								ty,
-								value: _,
-							} => *ty,
-							_ => unimplemented!(),
-						},
+						Arg::Const(index) => self.constant(*index).type_decl(),
+						Arg::Decl(index) => self.decl(*index).type_decl,
 					};
 
 					if convert_to_bool {
-						Ok(Self::BOOL_TYPE_DECL)
+						Ok(BOOL_DECL)
 					} else {
 						match (lhs, rhs) {
-							(Self::FLOAT_TYPE_DECL, Self::INT_TYPE_DECL)
-							| (Self::INT_TYPE_DECL, Self::FLOAT_TYPE_DECL) => Ok(Self::FLOAT_TYPE_DECL),
+							(FLOAT_DECL, INT_DECL) | (INT_DECL, FLOAT_DECL) => Ok(FLOAT_DECL),
 							_ => Ok(self.implicit_cast(rhs, lhs)?),
 						}
 					}
 				}
 				Op::Unary(_, value) => match value {
-					OpArg::Constant(index) => Ok(self.constants[*index].type_decleration()),
-					OpArg::Variable(index) => match &self.statements[*index] {
-						Statement::Decleration {
-							mutable: _,
-							ty,
-							value: _,
-						} => Ok(*ty),
-						_ => unimplemented!(),
-					},
+					Arg::Const(index) => Ok(self.constant(*index).type_decl()),
+					Arg::Decl(index) => Ok(self.decl(*index).type_decl),
 				},
 			},
-			Expression::Constant { value } => Ok(self.constants[*value].type_decleration()),
-			Expression::Variable { target } => match &self.statements[*target] {
-				Statement::Decleration {
-					mutable: _,
-					ty,
-					value: _,
-				} => Ok(*ty),
-				_ => unreachable!(),
-			},
+			Expr::Const(value) => Ok(self.constant(*value).type_decl()),
+			Expr::Decl(target) => Ok(self.decl(*target).type_decl),
 			_ => unimplemented!(),
 		}
 	}
 
 	/// Determine a type can implicit cast to another, given the types decleration index. Return the result type decleration index
-	fn implicit_cast(&self, from: usize, to: usize) -> Result<usize> {
+	fn implicit_cast(&self, from: DeclId, to: DeclId) -> Result<DeclId> {
 		// If we're the same type decl index than we must be able to cast to ourselves
 		if from == to {
 			return Ok(to);
 		}
 
-		let from_index = from;
 		let to_index = to;
 
 		// Acquire the type info from the type decleration
 		let (from, to) = (
-			match &self.statements[from] {
-				Statement::Decleration {
-					mutable: _,
-					ty: _,
-					value,
-				} => match value {
-					Expression::Type(ty) => ty,
-					_ => unreachable!(),
-				},
-				_ => unimplemented!(),
+			match &self.decl(from).value {
+				Expr::Type(ty) => ty,
+				_ => unreachable!(),
 			},
-			match &self.statements[to] {
-				Statement::Decleration {
-					mutable: _,
-					ty: _,
-					value,
-				} => match value {
-					Expression::Type(ty) => ty,
-					_ => unreachable!(),
-				},
-				_ => unimplemented!(),
+			match &self.decl(to).value {
+				Expr::Type(ty) => ty,
+				_ => unreachable!(),
 			},
 		);
 
@@ -291,41 +358,42 @@ impl Generator {
 		}
 		// If not then throw an error
 		else {
-			Err(GeneratorError::CanNotImplicitCast {
-				from: from_index,
-				to: to_index,
+			Err(Error::CanNotCast {
+				from: from.clone(),
+				to: to.clone(),
 			})
 		}
 	}
 
-	fn generate_body(&mut self, ast: &Ast, body: &ast::Body) -> Result<usize> {
-		let block = self.statements.len();
-		self.statements.push(Statement::Block);
+	fn eval_body(&mut self, ast: &Ast, body: &ast::Body) -> Result<BlockId> {
+		let block = BlockId(self.push_ir(Ir::Block));
 
-		for statement in &body.statements {
-			if let Some(statement) = self.generate_statement(ast, statement)? {
-				self.statements.push(statement);
-			}
+		let scope = ScopeId(self.scopes.len());
+		self.scopes.push(Scope {
+			parent: Some(self.top_scope()),
+			start: block,
+			locals: HashMap::new(),
+			used: Vec::new(),
+		});
+
+		self.stack.push(scope);
+		for stmt in &body.statements {
+			self.eval_stmt(ast, stmt)?;
 		}
+		self.stack.pop();
 
 		Ok(block)
 	}
 
-	fn generate_statement(
-		&mut self,
-		ast: &Ast,
-		statement: &ast::Statement,
-	) -> Result<Option<Statement>> {
+	fn eval_stmt(&mut self, ast: &Ast, statement: &ast::Statement) -> Result<()> {
 		match statement {
 			ast::Statement::Decleration(decl) => {
 				// Generate the expression IR
-				let value = self.generate_expression(ast, &decl.value, 0)?;
+				let value = self.eval_expr(ast, &decl.value, 0)?.unwrap();
 
 				// Add this statement into the symbol lookup table. This effectively does SSA as we
 				// will update the variable index to the new variable decl.
-				let name = decl.name.slice_str(ast.src).to_string();
-				let index = self.statements.len();
-				self.symbols.insert(name, index);
+				let name = decl.name.slice_str(ast.src);
 
 				// Determine what the type of this expression should be
 				let ty = self.infer_type(&value)?;
@@ -334,10 +402,10 @@ impl Generator {
 				// cast to it
 				let ty = if let Some(decl_ty) = decl.ty {
 					let name = decl_ty.slice_str(ast.src);
-					let decl_ty = *self
-						.symbols
-						.get(name)
-						.ok_or(GeneratorError::UnknownDecleration(name.to_string()))?;
+					let decl_ty = self
+						.query_local(self.top_scope(), name)
+						.ok_or(Error::UnknownDecl(name.to_string()))?
+						.0;
 					self.implicit_cast(ty, decl_ty)?
 				}
 				// Otherwise use the inferred type
@@ -345,74 +413,75 @@ impl Generator {
 					ty
 				};
 
-				Ok(Some(Statement::Decleration {
-					mutable: decl.mutable,
-					ty,
-					value,
-				}))
+				self.push_local(
+					name,
+					Decl {
+						mutable: decl.mutable,
+						type_decl: ty,
+						value,
+					},
+				);
+
+				Ok(())
 			}
 			ast::Statement::Expression(expr) => {
-				self.generate_expression(ast, expr, 0)?;
-				Ok(None)
+				self.eval_expr(ast, expr, 0)?;
+				Ok(())
 			}
 			_ => unimplemented!(),
 		}
 	}
 
-	fn generate_expression(
+	fn eval_expr(
 		&mut self,
 		ast: &Ast,
 		expression: &ast::Expression,
 		depth: u8,
-	) -> Result<Expression> {
+	) -> Result<Option<Expr>> {
 		match expression {
 			ast::Expression::Assignment(assignment) => {
+				// Query the local from the stack
 				let name = assignment.variable.slice_str(ast.src);
-				match self.symbols.get(name) {
-					Some(s) => {
-						if let Statement::Decleration { mutable, ty, value } =
-							self.statements[*s].clone()
-						{
-							// Determine if original decleration was marked as mutable
-							if !mutable {
-								return Err(GeneratorError::DeclerationImmutable(name.to_string()));
-							}
+				let local = self
+					.query_local(self.top_scope(), name)
+					.ok_or_else(|| Error::UnknownDecl(name.to_string()))?
+					.0;
+				let local = self.decl(local).clone();
 
-							// Generate expression before pushing new SSA decleration
-							let new_value =
-								self.generate_expression(ast, &assignment.value, depth)?;
-
-							// Determine what the type of this expression should be
-							let inferred_ty = self.infer_type(&value)?;
-							let ty = self.implicit_cast(inferred_ty, ty)?;
-
-							// Update the symbols table with the newest decleration value and push
-							// the new decleration
-							let index = self.statements.len();
-							self.symbols.insert(name.to_string(), index);
-							self.statements.push(Statement::Decleration {
-								mutable,
-								ty,
-								value: new_value,
-							});
-
-							Ok(Expression::Variable { target: index })
-						} else {
-							unreachable!();
-						}
-					}
-					None => Err(GeneratorError::UnknownDecleration(name.to_string())),
+				// Determine if original decleration was marked as mutable
+				if !local.mutable {
+					return Err(Error::DeclImmutable(name.to_string()));
 				}
+
+				// Generate expression before pushing new SSA decleration
+				let new_value = self.eval_expr(ast, &assignment.value, depth)?.unwrap();
+
+				// Ensure that the expression results in a type this local can use
+				let inferred = self.infer_type(&local.value)?;
+				let type_decl = self.implicit_cast(inferred, local.type_decl)?;
+
+				// Update the symbols table with the newest decleration value and push
+				// the new decleration
+				let index = self.push_local(
+					name,
+					Decl {
+						mutable: true,
+						type_decl,
+						value: new_value,
+					},
+				);
+
+				Ok(Some(Expr::Decl(index)))
 			}
 			ast::Expression::Constant(value) => {
 				// Convert the ast::Constant (which has no heap allocations) to the memory owning
 				// ir::Constant
 				let value = match value {
-					ast::Constant::Bool(value) => Constant::Bool(*value),
-					ast::Constant::Int(value) => Constant::Int(*value),
-					ast::Constant::Float(value) => Constant::Float(*value),
+					ast::Constant::Bool(value) => Const::Bool(*value),
+					ast::Constant::Int(value) => Const::Int(*value),
+					ast::Constant::Float(value) => Const::Float(*value),
 					ast::Constant::String(value) => {
-						Constant::String(value.slice_str(ast.src).to_string())
+						Const::String(value.slice_str(ast.src).to_string())
 					}
 				};
 
@@ -420,44 +489,47 @@ impl Generator {
 				let index = self.constants.len();
 				self.constants.push(value);
 
-				Ok(Expression::Constant { value: index })
+				Ok(Some(Expr::Const(ConstId(index))))
 			}
 			ast::Expression::Identifier { name } => {
-				// Query the identifier in the symbols table and throw an error if it does not
-				// exist.
 				let name = name.slice_str(ast.src);
-				let target = *self
-					.symbols
-					.get(name)
-					.ok_or(GeneratorError::UnknownDecleration(name.to_string()))?;
-				Ok(Expression::Variable { target })
+				let decl = self
+					.query_local(self.top_scope(), name)
+					.ok_or(Error::UnknownDecl(name.to_string()))?
+					.0;
+
+				// Keep track that this identifier was used in the current scope
+				let scope = self.top_scope();
+				let scope = self.scope_mut(scope);
+				scope.used.push(decl);
+
+				Ok(Some(Expr::Decl(decl)))
 			}
 			ast::Expression::Operation {
 				operator: op,
 				input,
 			} => match op {
 				ast::Op::Binary(op) => {
-					let lhs = self.generate_expression(ast, &input[0], depth + 1)?;
-					let rhs = self.generate_expression(ast, &input[1], depth + 1)?;
+					let lhs = self.eval_expr(ast, &input[0], depth + 1)?.unwrap();
+					let rhs = self.eval_expr(ast, &input[1], depth + 1)?.unwrap();
 
-					let result = Expression::Op(Op::Binary {
+					let result = Expr::Op(Op::Binary {
 						op: *op,
-						lhs: lhs.as_op_arg().unwrap(),
-						rhs: rhs.as_op_arg().unwrap(),
+						lhs: lhs.assume_arg(),
+						rhs: rhs.assume_arg(),
 					});
 
 					if depth == 0 {
-						Ok(result)
+						Ok(Some(result))
 					} else {
-						let ty = self.infer_type(&result)?;
+						let type_decl = self.infer_type(&result)?;
 
-						let index = self.statements.len();
-						self.statements.push(Statement::Decleration {
+						let index = self.push_decl(Decl {
 							mutable: false,
-							ty,
+							type_decl,
 							value: result,
 						});
-						Ok(Expression::Variable { target: index })
+						Ok(Some(Expr::Decl(index)))
 					}
 				}
 				_ => unimplemented!(),
@@ -467,41 +539,39 @@ impl Generator {
 				else_if_branches,
 				else_body,
 			} => {
-				self.generate_branch(ast, if_branch)?;
+				self.eval_branch(ast, if_branch)?;
 
 				for branch in else_if_branches.iter() {
-					self.generate_branch(ast, branch)?;
+					self.eval_branch(ast, branch)?;
 				}
 
 				if let Some(body) = else_body {
-					self.generate_body(ast, body)?;
+					self.eval_body(ast, body)?;
 				}
 
-				todo!()
+				Ok(None)
 			}
 			_ => unimplemented!(),
 		}
 	}
 
-	fn generate_branch(&mut self, ast: &Ast, branch: &ast::Branch) -> Result<()> {
-		let condition = self.generate_expression(ast, &branch.condition, 0)?;
+	fn eval_branch(&mut self, ast: &Ast, branch: &ast::Branch) -> Result<()> {
+		let condition = self.eval_expr(ast, &branch.condition, 0)?.unwrap();
 		let ty = self.infer_type(&condition)?;
-		let ty = self.implicit_cast(ty, Self::BOOL_TYPE_DECL)?;
+		let ty = self.implicit_cast(ty, BOOL_DECL)?;
 
-		let index = self.statements.len();
-		self.statements.push(Statement::Decleration {
+		let condition = self.push_decl(Decl {
 			mutable: false,
-			ty,
+			type_decl: ty,
 			value: condition,
 		});
-		let condition = index;
 
-		self.statements.push(Statement::JumpIf {
-			condition,
-			if_true: 0,
-			if_false: 0,
-		});
-		self.generate_body(ast, &branch.body)?;
+		self.push_ir(Ir::JumpIf(JumpIf {
+			cond: condition,
+			true_block: BlockId(0),
+			false_block: BlockId(0),
+		}));
+		self.eval_body(ast, &branch.body)?;
 
 		Ok(())
 	}
@@ -509,7 +579,16 @@ impl Generator {
 
 #[cfg(test)]
 mod test {
-	use super::*;
+	use {
+		super::*,
+		crate::{
+			ast::ParseError,
+			lexer::{
+				LexerError,
+				Location,
+			},
+		},
+	};
 
 	fn print_location(src: &str, location: Location) {
 		let mut byte_offset = 0;
@@ -549,29 +628,18 @@ mod test {
 		}
 	}
 
-	fn print_expression(
-		generator: &Generator,
-		index_to_symbol: &HashMap<usize, String>,
-		expression: &Expression,
-	) {
+	fn print_expr(generator: &Generator, expression: &Expr) {
 		match expression {
-			Expression::NoOp => {
-				print!("noop");
+			Expr::Decl(target) => {
+				print!("{}", *target);
 			}
-			Expression::Variable { target } => {
-				if let Some(name) = index_to_symbol.get(target) {
-					print!("{}", name);
-				} else {
-					print!("%{}", *target);
-				}
+			Expr::Const(value) => {
+				print!("const {:?}", generator.constant(*value));
 			}
-			Expression::Constant { value } => {
-				print!("{:?}", generator.constants[*value]);
-			}
-			Expression::Type(ty) => {
+			Expr::Type(ty) => {
 				print!("{:?}", ty);
 			}
-			Expression::Op(op) => match op {
+			Expr::Op(op) => match op {
 				Op::Binary { op, lhs, rhs } => {
 					let op = match op {
 						BinaryOp::Add => "add",
@@ -589,10 +657,10 @@ mod test {
 						BinaryOp::LogicalAnd => "and",
 						BinaryOp::LogicalOr => "or",
 					};
-					print!("{:^3} ", op);
-					print_expression(generator, index_to_symbol, &lhs.to_expression());
+					print!("{:>3} ", op);
+					print_expr(generator, &lhs.as_expr());
 					print!(", ");
-					print_expression(generator, index_to_symbol, &rhs.to_expression());
+					print_expr(generator, &rhs.as_expr());
 				}
 				Op::Unary(_, _) => {
 					unimplemented!()
@@ -640,64 +708,31 @@ mod test {
 
 		let mut generator = Generator::new();
 		generator.generate(&ast).unwrap();
-		let index_to_symbol: HashMap<_, _> = generator
-			.symbols
-			.iter()
-			.map(|(k, v)| (*v, k.clone()))
-			.collect();
+		println!("{:#?}", generator);
 
 		println!();
-		for (index, statement) in generator.statements.iter().enumerate() {
-			match statement {
-				Statement::Decleration {
-					mutable: _,
-					ty,
-					value,
-				} => {
-					if *ty == index {
-						continue;
-					}
-
-					if let Some(name) = index_to_symbol.get(&index) {
-						print!("{:>16}", name);
-					} else {
-						print!("{:>16}", format!("%{}", index));
-					}
-
-					print!(": ");
-					if let Some(name) = index_to_symbol.get(ty) {
-						print!("{:<5} = ", name);
-					} else {
-						print!("%{:<5} = ", index);
-					}
-
-					print_expression(&generator, &index_to_symbol, value);
+		for (id, ir) in generator.ir.iter().enumerate() {
+			match ir {
+				Ir::Decl(decl) => {
+					let id = DeclId(id);
+					let id = format!("{}", id);
+					print!("{:>5}: {:>5} = ", id, decl.type_decl);
+					print_expr(&generator, &decl.value);
 					println!(";");
 				}
-				Statement::Jump { target } => {
-					print!("{:>16}  ", "br");
-
-					if let Some(name) = index_to_symbol.get(target) {
-						print!("{}", name);
-					} else {
-						print!("%{}", target);
-					}
+				Ir::Jump(target) => {
+					println!("{:>5}  {}", "br", target);
 				}
-				Statement::JumpIf {
-					condition,
-					if_true,
-					if_false,
-				} => {
-					print!("{:>16}  ", "br");
-
-					if let Some(name) = index_to_symbol.get(condition) {
-						print!("{}", name);
-					} else {
-						print!("%{}", condition);
-					}
-					println!(", %{}, %{}", if_true, if_false);
+				Ir::JumpIf(jump_if) => {
+					println!(
+						"{:>5}  {}, {}, {}",
+						"br", jump_if.cond, jump_if.true_block, jump_if.false_block
+					);
 				}
-				_ => println!("{:?}", statement),
+				Ir::Block => {
+					println!();
+					println!("block({})", BlockId(id));
+				}
 			}
 		}
 		println!();

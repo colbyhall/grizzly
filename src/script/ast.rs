@@ -1,5 +1,11 @@
 use {
-	crate::lexer::{Lexer, LexerError, Location, Token, TokenKind},
+	crate::lexer::{
+		Lexer,
+		LexerError,
+		Location,
+		Token,
+		TokenKind,
+	},
 	root::iter::Peekable,
 };
 
@@ -309,7 +315,7 @@ pub struct Ast<'a> {
 }
 
 impl<'a> Ast<'a> {
-	pub fn new(src: &'a str) -> Result<Ast, ParseError> {
+	pub fn new(src: &'a str) -> Result<Self, ParseError> {
 		let mut parser = Parser {
 			src,
 			lexer: Lexer::new(src).peekable(),
