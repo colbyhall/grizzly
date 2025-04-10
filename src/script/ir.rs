@@ -19,6 +19,7 @@ pub enum Type {
 	String,
 }
 
+#[derive(Clone)]
 pub enum Const {
 	Bool(bool),
 	Int(i64),
@@ -31,7 +32,7 @@ impl fmt::Debug for Const {
 		match self {
 			Const::Bool(v) => write!(f, "{}", v),
 			Const::Int(v) => write!(f, "{}", v),
-			Const::Float(v) => write!(f, "{}", v),
+			Const::Float(v) => write!(f, "{}f64", v),
 			Const::String(v) => write!(f, "{:?}", v),
 		}
 	}
@@ -571,6 +572,7 @@ impl Generator {
 				// Retain the current block incase there in no else block and phi resolution
 				// requires original blocks decl
 				let original = self.current_block.unwrap();
+				let mut phi_original = vec![original];
 
 				// Keep track of:
 				// - All jump IR that needs to be patched with the soon to be created merge block
@@ -593,6 +595,10 @@ impl Generator {
 					if index < branches.len() - 1 {
 						let false_block = self.push_block(self.top_scope());
 						self.jump_if_mut(jump_if).false_block = false_block;
+
+						// TODO: This is only required for the last if statement that if false goes
+						// to merge block
+						phi_original.push(false_block);
 					} else {
 						last_jump_if = Some(jump_if);
 					}
@@ -654,11 +660,13 @@ impl Generator {
 				// If we have no else body then we need to append the original value to the phi
 				// expression
 				if else_body.is_none() {
-					for (name, map) in resolve.iter_mut() {
-						let scope = self.top_scope();
-						let scope = self.scope(scope);
-						let decl = scope.locals.get(name).cloned().unwrap();
-						map.push((original, decl));
+					for block in phi_original.iter() {
+						for (name, map) in resolve.iter_mut() {
+							let scope = self.top_scope();
+							let scope = self.scope(scope);
+							let decl = scope.locals.get(name).cloned().unwrap();
+							map.push((*block, decl));
+						}
 					}
 				}
 
@@ -722,6 +730,221 @@ impl Generator {
 		let merge = JumpId(self.push_ir(Ir::Jump(BlockId(0))));
 
 		Ok((jump_if, merge))
+	}
+}
+
+#[derive(Debug)]
+pub struct Interpreter {
+	ir: Vec<Ir>,
+	consts: Vec<Const>,
+	pc: usize,
+	last_block: BlockId,
+	current_block: BlockId,
+	decls: HashMap<DeclId, Const>,
+}
+
+impl Interpreter {
+	pub fn run(ir: Vec<Ir>, consts: Vec<Const>) -> Self {
+		let mut interp = Self {
+			ir,
+			consts,
+			pc: 0,
+			last_block: BlockId(0),
+			current_block: BlockId(0),
+			decls: HashMap::new(),
+		};
+		'outer: loop {
+			match &interp.ir[interp.pc] {
+				Ir::Block(_) => {
+					interp.last_block = interp.current_block;
+					interp.current_block = BlockId(interp.pc);
+				}
+				Ir::Decl(decl) => {
+					// TODO: Ensure that value is casted to the correct type
+					let value = match &decl.value {
+						Expr::Decl(d) => interp.decl(*d),
+						Expr::Const(d) => interp.consts(*d),
+						Expr::Phi(p) => {
+							let mut r = None;
+							for (block, decl) in p.0.iter() {
+								if interp.last_block == *block {
+									r = Some(interp.decl(*decl));
+								}
+							}
+							r.unwrap()
+						}
+						Expr::Type(_) => {
+							interp.pc += 1;
+							continue 'outer;
+						}
+						Expr::Op(op) => match op {
+							Op::Binary { op, lhs, rhs } => {
+								let lhs = interp.arg(*lhs);
+								let rhs = interp.arg(*rhs);
+
+								match op {
+									BinaryOp::Add => match (&lhs, &rhs) {
+										(Const::Int(x), Const::Int(y)) => Const::Int(x + y),
+										(Const::Float(x), Const::Int(y)) => {
+											Const::Float(x + (*y as f64))
+										}
+										(Const::Int(x), Const::Float(y)) => {
+											Const::Float((*x as f64) + y)
+										}
+										(Const::Float(x), Const::Float(y)) => Const::Float(x + y),
+										_ => unreachable!(),
+									},
+									BinaryOp::Sub => match (&lhs, &rhs) {
+										(Const::Int(x), Const::Int(y)) => Const::Int(x - y),
+										(Const::Float(x), Const::Int(y)) => {
+											Const::Float(x - (*y as f64))
+										}
+										(Const::Int(x), Const::Float(y)) => {
+											Const::Float((*x as f64) - y)
+										}
+										(Const::Float(x), Const::Float(y)) => Const::Float(x - y),
+										_ => unreachable!(),
+									},
+									BinaryOp::Mul => match (&lhs, &rhs) {
+										(Const::Int(x), Const::Int(y)) => Const::Int(x * y),
+										(Const::Float(x), Const::Int(y)) => {
+											Const::Float(x * (*y as f64))
+										}
+										(Const::Int(x), Const::Float(y)) => {
+											Const::Float((*x as f64) * y)
+										}
+										(Const::Float(x), Const::Float(y)) => Const::Float(x * y),
+										_ => unreachable!(),
+									},
+									BinaryOp::Div => match (&lhs, &rhs) {
+										(Const::Int(x), Const::Int(y)) => Const::Int(x / y),
+										(Const::Float(x), Const::Int(y)) => {
+											Const::Float(x / (*y as f64))
+										}
+										(Const::Int(x), Const::Float(y)) => {
+											Const::Float((*x as f64) / y)
+										}
+										(Const::Float(x), Const::Float(y)) => Const::Float(x / y),
+										_ => unreachable!(),
+									},
+									BinaryOp::EqualTo => match (&lhs, &rhs) {
+										(Const::Int(x), Const::Int(y)) => Const::Bool(x == y),
+										(Const::Float(x), Const::Int(y)) => {
+											Const::Bool(*x == (*y as f64))
+										}
+										(Const::Int(x), Const::Float(y)) => {
+											Const::Bool((*x as f64) == *y)
+										}
+										(Const::Float(x), Const::Float(y)) => Const::Bool(x == y),
+										(Const::Bool(x), Const::Bool(y)) => Const::Bool(x == y),
+										(Const::String(x), Const::String(y)) => Const::Bool(x == y),
+										_ => unreachable!(),
+									},
+									BinaryOp::NotEqualTo => match (&lhs, &rhs) {
+										(Const::Int(x), Const::Int(y)) => Const::Bool(x != y),
+										(Const::Float(x), Const::Int(y)) => {
+											Const::Bool(*x != (*y as f64))
+										}
+										(Const::Int(x), Const::Float(y)) => {
+											Const::Bool((*x as f64) != *y)
+										}
+										(Const::Float(x), Const::Float(y)) => Const::Bool(x != y),
+										(Const::Bool(x), Const::Bool(y)) => Const::Bool(x != y),
+										(Const::String(x), Const::String(y)) => Const::Bool(x != y),
+										_ => unreachable!(),
+									},
+									BinaryOp::LessThan => match (&lhs, &rhs) {
+										(Const::Int(x), Const::Int(y)) => Const::Bool(x < y),
+										(Const::Float(x), Const::Int(y)) => {
+											Const::Bool(*x < (*y as f64))
+										}
+										(Const::Int(x), Const::Float(y)) => {
+											Const::Bool((*x as f64) < *y)
+										}
+										(Const::Float(x), Const::Float(y)) => Const::Bool(x < y),
+										_ => unreachable!(),
+									},
+									BinaryOp::LessThanOrEqual => match (&lhs, &rhs) {
+										(Const::Int(x), Const::Int(y)) => Const::Bool(x <= y),
+										(Const::Float(x), Const::Int(y)) => {
+											Const::Bool(*x <= (*y as f64))
+										}
+										(Const::Int(x), Const::Float(y)) => {
+											Const::Bool((*x as f64) <= *y)
+										}
+										(Const::Float(x), Const::Float(y)) => Const::Bool(x <= y),
+										_ => unreachable!(),
+									},
+									BinaryOp::GreaterThan => match (&lhs, &rhs) {
+										(Const::Int(x), Const::Int(y)) => Const::Bool(x > y),
+										(Const::Float(x), Const::Int(y)) => {
+											Const::Bool(*x > (*y as f64))
+										}
+										(Const::Int(x), Const::Float(y)) => {
+											Const::Bool((*x as f64) > *y)
+										}
+										(Const::Float(x), Const::Float(y)) => Const::Bool(x > y),
+										_ => unreachable!(),
+									},
+									BinaryOp::GreaterThanOrEqual => match (&lhs, &rhs) {
+										(Const::Int(x), Const::Int(y)) => Const::Bool(x >= y),
+										(Const::Float(x), Const::Int(y)) => {
+											Const::Bool(*x >= (*y as f64))
+										}
+										(Const::Int(x), Const::Float(y)) => {
+											Const::Bool((*x as f64) >= *y)
+										}
+										(Const::Float(x), Const::Float(y)) => Const::Bool(x >= y),
+										_ => unreachable!(),
+									},
+									_ => unimplemented!(),
+								}
+							}
+							_ => unimplemented!(),
+						},
+					};
+
+					interp.decls.insert(DeclId(interp.pc), value);
+				}
+				Ir::Jump(jump) => {
+					interp.pc = jump.0;
+					continue 'outer;
+				}
+				Ir::JumpIf(jump_if) => match interp.decl(jump_if.cond) {
+					Const::Bool(x) => {
+						if x {
+							interp.pc = jump_if.true_block.0;
+							continue 'outer;
+						} else {
+							interp.pc = jump_if.false_block.0;
+							continue 'outer;
+						}
+					}
+					_ => unreachable!(),
+				},
+			}
+			interp.pc += 1;
+			if interp.pc >= interp.ir.len() {
+				break;
+			}
+		}
+
+		interp
+	}
+
+	fn arg(&self, arg: Arg) -> Const {
+		match arg {
+			Arg::Decl(x) => self.decl(x),
+			Arg::Const(x) => self.consts(x),
+		}
+	}
+
+	fn decl(&self, id: DeclId) -> Const {
+		self.decls.get(&id).cloned().unwrap()
+	}
+
+	fn consts(&self, id: ConstId) -> Const {
+		self.consts[id.0].clone()
 	}
 }
 
@@ -829,11 +1052,9 @@ mod test {
 	#[test]
 	fn generate() {
 		let script = r#"
-            let mut i: Float = 45 + (123 + 123) * 42.0;
-            i = 420;
+            let mut i: Float = 45 + (123 + 123) * 42.5;
 
             if i > 420 {
-                i = 12300123;
                 if i == 0 {
                     i = i - 100;
                 }
@@ -842,7 +1063,7 @@ mod test {
                 }
             } else if i < 120 {
                 i = 123;
-            }
+            } 
 
             i = i + 100;
         "#;
@@ -899,5 +1120,15 @@ mod test {
 			}
 		}
 		println!();
+
+		let Generator {
+			scopes: _,
+			stack: _,
+			current_block: _,
+			constants,
+			ir,
+		} = generator;
+		let interp = Interpreter::run(ir, constants);
+		println!("{:#?}", interp.decls);
 	}
 }
