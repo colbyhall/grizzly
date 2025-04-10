@@ -70,11 +70,15 @@ pub enum Op {
 }
 
 #[derive(Debug, Clone)]
+pub struct Phi(Vec<(BlockId, DeclId)>);
+
+#[derive(Debug, Clone)]
 pub enum Expr {
 	Op(Op),
 	Decl(DeclId),
 	Const(ConstId),
 	Type(Type),
+	Phi(Phi),
 }
 
 impl Expr {
@@ -96,7 +100,7 @@ pub struct Decl {
 
 macro_rules! define_id {
 	($name:ident) => {
-		#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+		#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 		pub struct $name(usize);
 
 		impl root::fmt::Display for $name {
@@ -143,15 +147,17 @@ define_id!(ScopeId);
 pub struct Scope {
 	parent: Option<ScopeId>,
 	locals: HashMap<String, DeclId>,
-	mutated: Vec<String>,
+	mutated: HashMap<String, DeclId>,
 }
 
 #[derive(Debug, Default)]
 pub struct Generator {
 	scopes: Vec<Scope>,
 	stack: Vec<ScopeId>,
-	ir: Vec<Ir>,
+	current_block: Option<BlockId>,
+
 	constants: Vec<Const>,
+	ir: Vec<Ir>,
 }
 
 const BOOL_DECL: DeclId = DeclId(1);
@@ -166,15 +172,16 @@ impl Generator {
 			stack: Vec::new(),
 			ir: Vec::new(),
 			constants: Vec::new(),
+			current_block: None,
 		};
 
 		let scope = ScopeId(result.scopes.len());
-		let block = BlockId(result.push_ir(Ir::Block(scope)));
+		result.push_block(scope);
 
 		result.scopes.push(Scope {
 			parent: None,
 			locals: HashMap::new(),
-			mutated: Vec::new(),
+			mutated: HashMap::new(),
 		});
 		result.stack.push(scope);
 
@@ -212,12 +219,7 @@ impl Generator {
 	}
 
 	fn push_decl(&mut self, decl: Decl) -> DeclId {
-		let decl = DeclId(self.push_ir(Ir::Decl(decl)));
-
-		let scope = self.top_scope();
-		let scope = self.scope_mut(scope);
-
-		decl
+		DeclId(self.push_ir(Ir::Decl(decl)))
 	}
 
 	fn push_local(&mut self, name: &str, decl: Decl) -> DeclId {
@@ -268,18 +270,17 @@ impl Generator {
 		}
 	}
 
-	fn jump_if(&self, id: JumpIfId) -> &JumpIf {
-		match &self.ir[id.0] {
-			Ir::JumpIf(d) => d,
-			_ => unreachable!(),
-		}
-	}
-
 	fn jump_if_mut(&mut self, id: JumpIfId) -> &mut JumpIf {
 		match &mut self.ir[id.0] {
 			Ir::JumpIf(d) => d,
 			_ => unreachable!(),
 		}
+	}
+
+	fn push_block(&mut self, scope: ScopeId) -> BlockId {
+		let id = BlockId(self.push_ir(Ir::Block(scope)));
+		self.current_block = Some(id);
+		id
 	}
 
 	fn block_scope(&self, id: BlockId) -> ScopeId {
@@ -308,6 +309,10 @@ impl Generator {
 	/// Given an expression, return an index to the result type decleration
 	fn infer_type(&mut self, expression: &Expr) -> Result<DeclId> {
 		match expression {
+			Expr::Phi(phi) => {
+				let decl = phi.0[0].1;
+				Ok(self.decl(decl).type_decl)
+			}
 			Expr::Op(op) => match op {
 				Op::Binary { op, lhs, rhs } => {
 					let convert_to_bool = matches!(
@@ -395,12 +400,12 @@ impl Generator {
 
 	fn eval_body(&mut self, ast: &Ast, body: &ast::Body) -> Result<BlockId> {
 		let scope = ScopeId(self.scopes.len());
-		let block = BlockId(self.push_ir(Ir::Block(scope)));
+		let block = self.push_block(scope);
 
 		self.scopes.push(Scope {
 			parent: Some(self.top_scope()),
 			locals: HashMap::new(),
-			mutated: Vec::new(),
+			mutated: HashMap::new(),
 		});
 
 		self.stack.push(scope);
@@ -423,7 +428,7 @@ impl Generator {
 				let name = decl.name.slice_str(ast.src);
 
 				// Determine what the type of this expression should be
-				let ty = self.infer_type(&value)?;
+				let inferred = self.infer_type(&value)?;
 
 				// If the decleration provides type info ensure that the expression can implicit
 				// cast to it
@@ -432,11 +437,11 @@ impl Generator {
 					let decl_ty = self
 						.query_local(self.top_scope(), name)
 						.ok_or(Error::UnknownDecl(name.to_string()))?;
-					self.implicit_cast(ty, decl_ty)?
+					self.implicit_cast(inferred, decl_ty)?
 				}
 				// Otherwise use the inferred type
 				else {
-					ty
+					inferred
 				};
 
 				self.push_local(
@@ -480,10 +485,6 @@ impl Generator {
 				let inferred = self.infer_type(&local.value)?;
 				let type_decl = self.implicit_cast(inferred, local.type_decl)?;
 
-				let scope = self.top_scope();
-				let scope = self.scope_mut(scope);
-				scope.mutated.push(name.to_string());
-
 				// Update the symbols table with the newest decleration value and push
 				// the new decleration
 				let index = self.push_local(
@@ -494,6 +495,10 @@ impl Generator {
 						value: new_value,
 					},
 				);
+
+				let scope = self.top_scope();
+				let scope = self.scope_mut(scope);
+				scope.mutated.insert(name.to_string(), index);
 
 				Ok(Some(Expr::Decl(index)))
 			}
@@ -557,57 +562,132 @@ impl Generator {
 				// statement
 				assert!(!branches.is_empty());
 
+				// The hard part about branching is needing to...
+				// a. Go back and manipulate Ir after its been pushed. This means you need to do
+				// some book keeping about what Ir you need to go back to
+				// b. For phi resolution you need to keep track of what declerations have been
+				// mutated in branch scopes and what block those mutations occurred in
+
+				// Retain the current block incase there in no else block and phi resolution
+				// requires original blocks decl
+				let original = self.current_block.unwrap();
+
 				// Keep track of:
 				// - All jump IR that needs to be patched with the soon to be created merge block
-				// - Scope id's to all children branch scope for later local mutation solving
-				// - The last jump if statement as we will need to patch its false_block to be else
+				// - Block id's to all children branch scope for later phi solving
+				// - The last jump-if statement as we will need to patch its false_block to be else
 				// body or merge block
-				let mut scopes = Vec::new();
+				let mut phi_candidates = Vec::new();
 				let mut merge_jumps = Vec::with_capacity(branches.len());
-				let mut last_patch = None;
+				let mut last_jump_if = None;
 				for (index, branch) in branches.iter().enumerate() {
 					// Evaluate the branch and then append its jump location that will later be
 					// patched when the merge block is created.
-					let (jump_if, merge_patch) = self.eval_branch(ast, branch)?;
-					merge_jumps.push(merge_patch);
+					let (jump_if, merge_jump) = self.eval_branch(ast, branch)?;
+					merge_jumps.push(merge_jump);
 
-					// Keep track of the scope for later phi solving
-					let true_block = self.jump_if(jump_if);
-					scopes.push(self.block_scope(true_block.true_block));
+					phi_candidates.push(self.current_block.unwrap());
 
 					// For any branch that isnt the last before the else body, create a block in
 					// the current scope so we can evaluate the next branch condition and branch
 					if index < branches.len() - 1 {
-						let false_block = BlockId(self.push_ir(Ir::Block(self.top_scope())));
+						let false_block = self.push_block(self.top_scope());
 						self.jump_if_mut(jump_if).false_block = false_block;
 					} else {
-						last_patch = Some(jump_if);
+						last_jump_if = Some(jump_if);
 					}
 				}
-				let last_patch = last_patch.unwrap();
+				let last_jump_if = last_jump_if.unwrap();
 
 				// If there is an else body append a jump to merge block and then patch the last
 				// jump if's false_block to be this else block
 				if let Some(body) = else_body {
+					// Eval the else body and append the block to the last jump if
 					let else_block = self.eval_body(ast, body)?;
-					merge_jumps.push(JumpId(self.push_ir(Ir::Jump(BlockId(0)))));
+					self.jump_if_mut(last_jump_if).false_block = else_block;
 
-					self.jump_if_mut(last_patch).false_block = else_block;
+					// Else body could have mutated locals so its a merge candidate
+					phi_candidates.push(self.current_block.unwrap());
+
+					// Append a merge jump that will later be patched with the yet to be created
+					// merge block
+					let merge_jump = JumpId(self.push_ir(Ir::Jump(BlockId(0))));
+					merge_jumps.push(merge_jump);
 				}
 
 				// Create the merge block and then patch previous branch IR
-				let merge_block = BlockId(self.push_ir(Ir::Block(self.top_scope())));
+				let merge_block = self.push_block(self.top_scope());
 				for jump in merge_jumps.iter() {
 					*self.jump_mut(*jump) = merge_block;
 				}
 
 				// Patch merge into false_block of last jump if if no else body is provided
 				if else_body.is_none() {
-					self.jump_if_mut(last_patch).false_block = merge_block;
+					self.jump_if_mut(last_jump_if).false_block = merge_block;
 				}
 
-				// TODO: Determine what was mutated in branch scopes and use phi to merge to new
-				// value
+				// We need to first figure out what local decls have been mutated. Since we're doing SSA
+				// there is no actual mutation and we just declare a new variables when we want it
+				// to change. For each mutated local we need to then keep track of what block and
+				// decl is the result for our mutation
+				let mut resolve: HashMap<String, Vec<(BlockId, DeclId)>> = HashMap::new();
+
+				// For every phi candidate determine what variables mutated in that scope.
+				for phi in phi_candidates.iter() {
+					// Scope is how we track what has been "mutated"
+					let scope = self.block_scope(*phi);
+					let scope = self.scope(scope);
+
+					// Multiple blocks can point to the same scope so there may be duplications. We handle that
+					// by using a HashMap of local variables and list of what blocks they were changed
+					// in along with the decl that is the new value.
+					for (mutated, decl) in scope.mutated.iter() {
+						let map = if let Some(entry) = resolve.get_mut(mutated) {
+							entry
+						} else {
+							resolve.entry(mutated.to_string()).or_default()
+						};
+						map.push((*phi, *decl));
+					}
+				}
+
+				// If we have no else body then we need to append the original value to the phi
+				// expression
+				if else_body.is_none() {
+					for (name, map) in resolve.iter_mut() {
+						let scope = self.top_scope();
+						let scope = self.scope(scope);
+						let decl = scope.locals.get(name).cloned().unwrap();
+						map.push((original, decl));
+					}
+				}
+
+				// Now we finally get to output the actual phi operator. This is how we handle
+				// different branches mutating variables in SSA. Phi takes in the block and the
+				// decl and it essentially means if we come from this block use this value
+				for (name, map) in resolve.iter() {
+					let params = map.iter().map(|(k, v)| (*k, *v)).collect();
+					let new_value = Expr::Phi(Phi(params));
+
+					// All the types have been ensured to have been valid when they were assigned
+					// in children scopes. We can kind of relax here.
+					let inferred = self.infer_type(&new_value)?;
+
+					// Push the new assignment using the phi expression
+					let index = self.push_local(
+						name,
+						Decl {
+							mutable: true,
+							type_decl: inferred,
+							value: new_value,
+						},
+					);
+
+					// Record that this variable has been mutated on this scope
+					let scope = self.top_scope();
+					let scope = self.scope_mut(scope);
+					scope.mutated.insert(name.to_string(), index);
+				}
 
 				Ok(None)
 			}
@@ -631,12 +711,6 @@ impl Generator {
 			true_block: BlockId(0),
 			false_block: BlockId(0),
 		})));
-
-		// For phi operator i need to keep track of branches that modify variables in a lower scope
-		// and what block they ocurred in
-		//
-		// All branch blocks need jump to the merge block where the phi resolves the value. We wont
-		// know where the merge block is so they will need to be updated after
 
 		let true_block = self.eval_body(ast, &branch.body)?;
 		match &mut self.ir[jump_if.0] {
@@ -704,6 +778,15 @@ mod test {
 
 	fn print_expr(generator: &Generator, expression: &Expr) {
 		match expression {
+			Expr::Phi(phi) => {
+				print!("phi ");
+				for (i, p) in phi.0.iter().enumerate() {
+					print!("[block({}), {}]", p.0, p.1);
+					if i < phi.0.len() - 1 {
+						print!(", ");
+					}
+				}
+			}
 			Expr::Decl(target) => {
 				print!("{}", *target);
 			}
@@ -750,9 +833,15 @@ mod test {
             i = 420;
 
             if i > 420 {
-                i = i - 100;
-            } else {
-                i = i * 123;
+                i = 12300123;
+                if i == 0 {
+                    i = i - 100;
+                }
+                else {
+                    i = 0;
+                }
+            } else if i < 120 {
+                i = 123;
             }
 
             i = i + 100;
@@ -784,9 +873,7 @@ mod test {
 
 		let mut generator = Generator::new();
 		generator.generate(&ast).unwrap();
-		println!("{:#?}", generator);
 
-		println!();
 		for (id, ir) in generator.ir.iter().enumerate() {
 			match ir {
 				Ir::Decl(decl) => {
